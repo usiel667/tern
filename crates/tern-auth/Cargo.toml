@@ -1,0 +1,20 @@
+[package]
+name = "tern-auth"
+description = "Secret storage (Secret Service) and OAuth2 for Tern"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tern-core.workspace = true
+keyring.workspace = true
+oauth2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+url.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

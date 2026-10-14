@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tern
+GenericName=Mail
+Comment=Read and send email
+Exec=tern
+Icon=mail-unread
+Terminal=false
+Categories=Network;Email;GTK;
+Keywords=email;mail;imap;
+StartupWMClass=dev.tern.Tern

@@ -1,0 +1,28 @@
+[package]
+name = "tern-sync"
+description = "Sync engine: runs backends on a Tokio thread, writes the store, notifies the UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tern-core.workspace = true
+tern-store.workspace = true
+tern-imap.workspace = true
+tern-jmap.workspace = true
+tern-smtp.workspace = true
+tern-auth.workspace = true
+tokio.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+directories.workspace = true
+toml.workspace = true
+serde.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

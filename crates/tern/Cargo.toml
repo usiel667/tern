@@ -1,0 +1,32 @@
+[package]
+name = "tern"
+description = "An Apple Mail-style email client for Linux (GTK4 + libadwaita)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tern"
+path = "src/main.rs"
+
+[build-dependencies]
+glib-build-tools = "0.22"
+
+[dependencies]
+tern-core.workspace = true
+tern-store.workspace = true
+tern-sync.workspace = true
+tern-auth.workspace = true
+tern-imap.workspace = true
+gtk.workspace = true
+adw.workspace = true
+webkit.workspace = true
+async-channel.workspace = true
+chrono.workspace = true
+base64.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

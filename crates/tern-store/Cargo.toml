@@ -1,0 +1,17 @@
+[package]
+name = "tern-store"
+description = "SQLite message cache and full-text search for Tern"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tern-core.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

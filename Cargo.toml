@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/tern-core",
+    "crates/tern-store",
+    "crates/tern-imap",
+    "crates/tern-jmap",
+    "crates/tern-smtp",
+    "crates/tern-auth",
+    "crates/tern-sync",
+    "crates/tern",
+]
+default-members = ["crates/tern"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tern-core = { path = "crates/tern-core" }
+tern-store = { path = "crates/tern-store" }
+tern-imap = { path = "crates/tern-imap" }
+tern-jmap = { path = "crates/tern-jmap" }
+tern-smtp = { path = "crates/tern-smtp" }
+tern-auth = { path = "crates/tern-auth" }
+tern-sync = { path = "crates/tern-sync" }
+
+anyhow = "1"
+thiserror = "2"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+futures = "0.3"
+directories = "6"
+mail-parser = "0.11"
+rusqlite = { version = "0.40", features = ["bundled"] }
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+webpki-roots = "1"
+rustls-native-certs = "0.8"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "builder", "hostname", "tokio1", "tokio1-rustls-tls", "rustls-native-certs"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+keyring = "4"
+base64 = "0.22"
+url = "2"
+async-channel = "2"
+
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+webkit = { package = "webkit6", version = "0.6" }
+
+[workspace.lints.clippy]
+# GTK state and channel payloads read better inline than as one-off type aliases.
+type_complexity = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,24 @@
+[package]
+name = "tern-imap"
+description = "IMAP backend for Tern (iCloud, Gmail, generic servers)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tern-core.workspace = true
+tern-auth.workspace = true
+async-imap.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls-native-certs.workspace = true
+futures.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

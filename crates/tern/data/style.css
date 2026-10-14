@@ -1,0 +1,115 @@
+/* Tern — Apple Mail-flavoured touches on top of libadwaita. */
+
+.sidebar-section {
+  font-weight: 700;
+  font-size: 0.8em;
+  opacity: 0.55;
+  margin: 14px 12px 4px 12px;
+}
+
+.mailbox-row {
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.badge {
+  font-size: 0.82em;
+  font-weight: 600;
+  opacity: 0.6;
+  min-width: 18px;
+}
+
+/* Message list */
+.message-row {
+  padding: 9px 14px 9px 6px;
+}
+
+.message-row .sender {
+  font-weight: 700;
+}
+
+.message-row .date,
+.message-row .preview {
+  opacity: 0.6;
+}
+
+.message-row .date {
+  font-size: 0.88em;
+}
+
+.message-row .preview {
+  font-size: 0.92em;
+}
+
+.unread-dot {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 99px;
+  background: @accent_bg_color;
+  margin-top: 5px;
+}
+
+.unread-dot.read {
+  background: transparent;
+}
+
+.thread-count {
+  font-size: 0.78em;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 99px;
+  background: alpha(currentColor, 0.12);
+}
+
+.flag-dot {
+  min-width: 9px;
+  min-height: 9px;
+  border-radius: 99px;
+}
+
+.flag-red    { background: #e01b24; }
+.flag-orange { background: #ff7800; }
+.flag-yellow { background: #f6d32d; }
+.flag-green  { background: #33d17a; }
+.flag-blue   { background: #3584e4; }
+.flag-purple { background: #9141ac; }
+.flag-gray   { background: #9a9996; }
+
+/* Viewer */
+.viewer-header {
+  padding: 16px 24px 12px 24px;
+}
+
+.viewer-subject {
+  font-size: 1.15em;
+  font-weight: 700;
+}
+
+.viewer-from {
+  font-weight: 700;
+}
+
+.conversation-row {
+  padding: 8px 24px;
+}
+
+.attachment-chip {
+  padding: 4px 10px;
+  border-radius: 8px;
+}
+
+/* Compose */
+.compose-field {
+  padding: 6px 12px;
+}
+
+.compose-field entry,
+.compose-field text {
+  background: none;
+  box-shadow: none;
+}
+
+.compose-body {
+  padding: 12px 16px;
+  font-size: 1.05em;
+}

@@ -1,0 +1,18 @@
+[package]
+name = "tern-smtp"
+description = "Message building and SMTP submission for Tern"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tern-core.workspace = true
+tern-auth.workspace = true
+lettre.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mail-parser.workspace = true
+
+[lints]
+workspace = true

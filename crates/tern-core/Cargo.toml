@@ -1,0 +1,17 @@
+[package]
+name = "tern-core"
+description = "Domain model, backend trait and conversation threading for Tern"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+chrono.workspace = true
+mail-parser.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
