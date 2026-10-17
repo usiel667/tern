@@ -52,7 +52,7 @@ Key decisions:
 | Incremental sync, flag changes, expunges | ✅ | UID window; live-tested on Dovecot |
 | Push (IMAP IDLE on inbox) | ✅ | reconnect with backoff |
 | JMAP push (EventSource) | ⬜ | polls every 2 min for now |
-| CONDSTORE / QRESYNC | ⬜ | big win for large mailboxes |
+| CONDSTORE / QRESYNC | ✅ | only changed flags / VANISHED; idle QRESYNC mailbox costs nothing; spec: `openspec` `mailbox-sync` |
 | Gmail labels (X-GM-LABELS), hide All Mail dupes | ⬜ | labels currently appear as folders |
 | Offline queue for flag/move ops | ✅ | every action queued in `pending_ops`, delivered in order; spec: `openspec` `mail-actions` |
 | Download older mail on scroll | ✅ | 250 per batch at the bottom of a mailbox or unified view; spec: `openspec` `mail-history` |
@@ -144,7 +144,9 @@ Key decisions:
    - ✅ Load older mail on scroll: list pages through the cache 500 rows at a time, then
      `LoadOlder` fetches 250 older per mailbox (IMAP UID SEARCH, JMAP anchored query);
      shares the per-mailbox sync slot (OpenSpec change `load-older-mail`).
-   - ⬜ CONDSTORE/QRESYNC.
+   - ✅ CONDSTORE/QRESYNC: cursor v2 stores HIGHESTMODSEQ; QRESYNC → CHANGEDSINCE + VANISHED,
+     CONDSTORE → CHANGEDSINCE + UID SEARCH, neither → full check; full check every 50th sync.
+     Live-tested against the local Dovecot in all three modes (OpenSpec change `imap-condstore-qresync`).
    - ⬜ JMAP EventSource push.
 3. **Compose polish:** drafts/autosave, address autocomplete, drag-and-drop attachments,
    Undo Send, signature editor, mailto: CLI handler.
@@ -156,8 +158,8 @@ Key decisions:
 ## Known gaps worth knowing now
 
 - First launch syncs every mailbox's newest 1000 messages; very large accounts will take a while.
-- IMAP incremental syncs fetch FLAGS for the whole cached UID window, so loading a lot of older
-  mail makes each sync heavier until CONDSTORE/QRESYNC lands.
+- IMAP servers without CONDSTORE still fetch FLAGS for the whole cached UID window on every
+  sync, so loading a lot of older mail makes their syncs heavier.
 - "Nothing older" is remembered per session only; after a restart the first scroll to the end asks again.
 - Gmail shows labels as folders (as Apple Mail does over IMAP), so a message can appear in several.
 - Failed sends retry every 5 minutes with no limit, and there's no Outbox view to see or

@@ -7,10 +7,12 @@
 mod connect;
 mod state;
 
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use async_imap::extensions::idle::IdleResponse;
-use async_imap::types::{Fetch, Flag, NameAttribute};
+use async_imap::types::{Fetch, Flag, NameAttribute, UnsolicitedResponse};
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use tern_auth::Credential;
@@ -35,11 +37,33 @@ const MANAGED_FLAGS: &[&str] = &[
     "$MailFlagBit0", "$MailFlagBit1", "$MailFlagBit2",
 ];
 
+/// Change-tracking extensions in use on a connection (RFC 7162).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extensions {
+    pub condstore: bool,
+    pub qresync: bool,
+}
+
+impl Extensions {
+    pub const ALL: Self = Self { condstore: true, qresync: true };
+    pub const NONE: Self = Self { condstore: false, qresync: false };
+}
+
+/// The command connection and what it negotiated.
+struct Conn {
+    session: Session,
+    ext: Extensions,
+}
+
 pub struct ImapBackend {
     server: ServerConfig,
     cred: Credential,
-    cmd: Mutex<Option<Session>>,
+    cmd: Mutex<Option<Conn>>,
     idle: Mutex<Option<Session>>,
+    /// Extensions we're allowed to use even if the server offers more (tests).
+    allowed: std::sync::Mutex<Extensions>,
+    /// Incremental syncs per mailbox this session, for the periodic full check.
+    sync_count: std::sync::Mutex<HashMap<String, u32>>,
 }
 
 impl ImapBackend {
@@ -49,7 +73,31 @@ impl ImapBackend {
             cred,
             cmd: Mutex::new(None),
             idle: Mutex::new(None),
+            allowed: std::sync::Mutex::new(Extensions::ALL),
+            sync_count: Default::default(),
         }
+    }
+
+    /// Test switch: behave as if the server offered at most `ext`. Drops the
+    /// current connection so the next command renegotiates.
+    #[doc(hidden)]
+    pub async fn limit_extensions(&self, ext: Extensions) {
+        *self.allowed.lock().unwrap() = ext;
+        *self.cmd.lock().await = None;
+    }
+
+    /// Log in and see which change-tracking extensions we can use. QRESYNC must
+    /// be ENABLEd per connection; it implies CONDSTORE.
+    async fn open_conn(&self) -> Result<Conn> {
+        let mut session = connect(&self.server, &self.cred).await?;
+        let caps = session.capabilities().await.map_err(cmd)?;
+        let allowed = *self.allowed.lock().unwrap();
+        let qresync = allowed.qresync && caps.has_str("QRESYNC");
+        let condstore = allowed.condstore && (qresync || caps.has_str("CONDSTORE"));
+        if qresync {
+            session.run_command_and_check_ok("ENABLE QRESYNC").await.map_err(cmd)?;
+        }
+        Ok(Conn { session, ext: Extensions { condstore, qresync } })
     }
 
     /// Connect and log in eagerly, to validate settings in the Add Account sheet.
@@ -65,9 +113,14 @@ impl ImapBackend {
         &self,
         f: impl AsyncFnOnce(&mut Session) -> Result<T>,
     ) -> Result<T> {
+        self.with_conn(async move |c| f(&mut c.session).await).await
+    }
+
+    /// `with_session`, with access to the negotiated extensions.
+    async fn with_conn<T>(&self, f: impl AsyncFnOnce(&mut Conn) -> Result<T>) -> Result<T> {
         let mut guard = self.cmd.lock().await;
         if guard.is_none() {
-            *guard = Some(connect(&self.server, &self.cred).await?);
+            *guard = Some(self.open_conn().await?);
         }
         let result = f(guard.as_mut().expect("just connected")).await;
         if matches!(result, Err(Error::Network(_) | Error::Protocol(_))) {
@@ -142,6 +195,62 @@ fn uid_set(ids: &[String]) -> String {
     ids.join(",")
 }
 
+/// Every this-many incremental syncs of a mailbox, check every cached message
+/// anyway, in case a server's change tracking misses something.
+const FULL_CHECK_EVERY: u32 = 50;
+
+fn full_check_due(nth_sync: u32) -> bool {
+    nth_sync.is_multiple_of(FULL_CHECK_EVERY)
+}
+
+/// How an incremental sync checks the cached window for flag changes and deletions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncMode {
+    /// FLAGS for every cached UID; deletions from what's missing (`present`).
+    Full,
+    /// CHANGEDSINCE for flags; UID SEARCH for `present`.
+    Condstore,
+    /// CHANGEDSINCE + VANISHED: only changed flags and the deleted UIDs.
+    Qresync,
+}
+
+fn sync_mode(ext: Extensions, prev_modseq: u64, now_modseq: u64, full_check: bool) -> SyncMode {
+    if !ext.condstore || prev_modseq == 0 || now_modseq < prev_modseq || full_check {
+        SyncMode::Full
+    } else if ext.qresync {
+        SyncMode::Qresync
+    } else {
+        SyncMode::Condstore
+    }
+}
+
+/// UIDs from VANISHED ranges that fall inside the cached window.
+fn vanished_in_window(ranges: &[RangeInclusive<u32>], low: u32, high: u32) -> Vec<String> {
+    let mut out: Vec<u32> = ranges
+        .iter()
+        .flat_map(|r| (*r.start()).max(low)..=(*r.end()).min(high))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out.into_iter().map(|u| u.to_string()).collect()
+}
+
+/// Empty the connection's unsolicited-response channel, returning any VANISHED
+/// ranges in it. async-imap buffers these in a 100-slot channel and drops new
+/// ones when it's full, so it must be emptied before a command whose VANISHED
+/// reply we need.
+fn drain_vanished(s: &mut Session) -> Vec<RangeInclusive<u32>> {
+    let mut out = Vec::new();
+    while let Ok(r) = s.unsolicited_responses.try_recv() {
+        if let UnsolicitedResponse::Other(data) = r
+            && let async_imap::imap_proto::Response::Vanished { uids, .. } = data.parsed()
+        {
+            out.extend(uids.iter().cloned());
+        }
+    }
+    out
+}
+
 /// From UID SEARCH results, the newest `count` UIDs below `low_uid` (ascending),
 /// and whether older ones remain after them.
 fn next_older(found: impl IntoIterator<Item = u32>, low_uid: u32, count: usize) -> (Vec<u32>, bool) {
@@ -198,9 +307,16 @@ impl MailBackend for ImapBackend {
         since: Option<&SyncState>,
         limit: Option<u32>,
     ) -> Result<MailboxDelta> {
-        self.with_session(async |s| {
-            let mb = s.select(mailbox).await.map_err(cmd)?;
+        self.with_conn(async |c| {
+            let ext = c.ext;
+            let s = &mut c.session;
+            let mb = if ext.condstore { s.select_condstore(mailbox).await } else { s.select(mailbox).await }
+                .map_err(cmd)?;
             let validity = mb.uid_validity.unwrap_or(0);
+            // The counter as of this SELECT is what we record: anything that changes
+            // while we're fetching has a higher modseq and is seen again next time.
+            // 0 = unknown (no CONDSTORE, or a NOMODSEQ mailbox).
+            let modseq_now = if ext.condstore { mb.highest_modseq.unwrap_or(0) } else { 0 };
             let prev = since.and_then(|st| ImapState::decode(&st.0));
             let mut delta = MailboxDelta {
                 ids_invalidated: prev.as_ref().is_some_and(|p| p.uid_validity != validity),
@@ -231,12 +347,28 @@ impl MailBackend for ImapBackend {
                         uid_validity: validity,
                         low_uid: uids.clone().min().unwrap_or(1),
                         high_uid: uids.max().unwrap_or(0),
+                        modseq: modseq_now,
                     };
                     delta.added = added;
                     delta.new_state = SyncState(st.encode());
                 }
                 Some(p) => {
-                    let mut st = p.clone();
+                    let mut st = ImapState { modseq: modseq_now, ..p.clone() };
+                    let nth = {
+                        let mut counts = self.sync_count.lock().unwrap();
+                        let n = counts.entry(mailbox.to_string()).or_default();
+                        *n += 1;
+                        *n
+                    };
+                    let mode = sync_mode(ext, p.modseq, modseq_now, full_check_due(nth));
+                    // Nothing changed and no new mail: no per-message traffic at all.
+                    if mode == SyncMode::Qresync
+                        && modseq_now == p.modseq
+                        && mb.uid_next.is_some_and(|next| next <= p.high_uid + 1)
+                    {
+                        delta.new_state = SyncState(st.encode());
+                        return Ok(delta);
+                    }
                     // New mail. `N:*` always returns at least the last message, so filter.
                     let fetches: Vec<Fetch> = s
                         .uid_fetch(format!("{}:*", p.high_uid + 1), ENVELOPE_ITEMS)
@@ -254,21 +386,38 @@ impl MailBackend for ImapBackend {
                     }
                     // Flag changes + expunges within the window we cache.
                     if p.high_uid >= p.low_uid && p.high_uid > 0 {
+                        let window = format!("{}:{}", p.low_uid, p.high_uid);
+                        let query = match mode {
+                            SyncMode::Full => "(UID FLAGS)".to_string(),
+                            SyncMode::Condstore => format!("(UID FLAGS) (CHANGEDSINCE {})", p.modseq),
+                            SyncMode::Qresync => format!("(UID FLAGS) (CHANGEDSINCE {} VANISHED)", p.modseq),
+                        };
+                        if mode == SyncMode::Qresync {
+                            drain_vanished(s);
+                        }
                         let fetches: Vec<Fetch> = s
-                            .uid_fetch(format!("{}:{}", p.low_uid, p.high_uid), "(UID FLAGS)")
+                            .uid_fetch(&window, query)
                             .await
                             .map_err(cmd)?
                             .try_collect()
                             .await
                             .map_err(cmd)?;
-                        let mut present = Vec::with_capacity(fetches.len());
-                        for f in &fetches {
-                            if let Some(uid) = f.uid {
-                                present.push(uid.to_string());
-                                delta.flags_changed.push((uid.to_string(), flags_of(f)));
+                        delta.flags_changed = fetches
+                            .iter()
+                            .filter_map(|f| Some((f.uid?.to_string(), flags_of(f))))
+                            .collect();
+                        match mode {
+                            SyncMode::Full => {
+                                delta.present = Some(delta.flags_changed.iter().map(|(u, _)| u.clone()).collect());
+                            }
+                            SyncMode::Condstore => {
+                                let found = s.uid_search(format!("UID {window}")).await.map_err(cmd)?;
+                                delta.present = Some(found.into_iter().map(|u| u.to_string()).collect());
+                            }
+                            SyncMode::Qresync => {
+                                delta.removed = vanished_in_window(&drain_vanished(s), p.low_uid, p.high_uid);
                             }
                         }
-                        delta.present = Some(present);
                     } else {
                         delta.present = Some(vec![]);
                     }
@@ -454,6 +603,37 @@ mod tests {
         assert_eq!(role_for("INBOX.Trash", &[]), MailboxRole::Trash);
         assert_eq!(role_for("Deleted Messages", &[]), MailboxRole::Trash);
         assert_eq!(role_for("Receipts", &[]), MailboxRole::Custom);
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)] // a list of one VANISHED range, on purpose
+    fn vanished_ranges_clamp_to_the_cached_window() {
+        let uids = |v: Vec<String>| v.into_iter().map(|u| u.parse::<u32>().unwrap()).collect::<Vec<_>>();
+        assert_eq!(uids(vanished_in_window(&[5..=5, 7..=7], 1, 10)), [5, 7], "single UIDs");
+        assert_eq!(uids(vanished_in_window(&[3..=6], 1, 10)), [3, 4, 5, 6], "a range");
+        assert_eq!(uids(vanished_in_window(&[1..=4, 9..=20], 3, 10)), [3, 4, 9, 10], "clamped at both edges");
+        assert_eq!(uids(vanished_in_window(&[2..=5, 4..=6], 1, 10)), [2, 3, 4, 5, 6], "overlaps deduplicated");
+        assert!(vanished_in_window(&[20..=30], 1, 10).is_empty(), "outside the window");
+        assert!(vanished_in_window(&[], 1, 10).is_empty());
+    }
+
+    #[test]
+    fn sync_mode_uses_the_best_available_tracking() {
+        use SyncMode::*;
+        let condstore = Extensions { condstore: true, qresync: false };
+        assert_eq!(sync_mode(Extensions::ALL, 100, 120, false), Qresync);
+        assert_eq!(sync_mode(condstore, 100, 120, false), Condstore);
+        assert_eq!(sync_mode(Extensions::NONE, 100, 120, false), Full);
+        assert_eq!(sync_mode(Extensions::ALL, 0, 120, false), Full, "v1 cursor: counter unknown");
+        assert_eq!(sync_mode(Extensions::ALL, 100, 0, false), Full, "NOMODSEQ mailbox");
+        assert_eq!(sync_mode(Extensions::ALL, 100, 90, false), Full, "counter went backwards");
+        assert_eq!(sync_mode(Extensions::ALL, 100, 120, true), Full, "periodic full check");
+    }
+
+    #[test]
+    fn full_check_every_fiftieth_sync() {
+        let due: Vec<u32> = (1..=150).filter(|&n| full_check_due(n)).collect();
+        assert_eq!(due, [50, 100, 150]);
     }
 
     #[test]

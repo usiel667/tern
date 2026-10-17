@@ -15,6 +15,22 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 
 ---
 
+## 2026-10-17 — Unsolicited-response buffer: suspected overflow, not reproduced
+
+**Suspected (while designing CONDSTORE/QRESYNC):** async-imap delivers `VANISHED` (and other
+unsolicited notices) through a channel bounded at 100 that drops new items when full, and Tern
+never read it, so on a long-lived connection deletion notices could be lost.
+
+**Measured:** probed the channel during the live `change_tracking` test against Dovecot 2.4
+after 240 commands across two mailboxes: it held at most one item (the `ENABLED` reply or a
+`VANISHED`). Re-selecting the mailbox for every command, as Tern does, keeps it nearly empty,
+and `[CLOSED]` doesn't reach it. The live test passes with or without draining.
+
+**Outcome:** `drain_vanished` empties it before each QRESYNC fetch anyway (one cheap call) in
+case other servers send more notices. Not a confirmed bug.
+
+---
+
 ## 2026-10-16 — IMAP reported a dropped connection as a protocol error
 
 **Seen (while designing the offline queue):** every IMAP command error went through
