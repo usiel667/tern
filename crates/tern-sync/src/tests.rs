@@ -11,8 +11,12 @@ use tern_store::ListScope;
 struct Fake {
     boxes: Mutex<HashMap<String, Vec<Envelope>>>,
     log: Mutex<Vec<String>>,
-    /// Make `submit` fail as if offline.
+    /// Make mutating calls (flags, move, expunge, submit) fail as if offline.
     offline: Mutex<bool>,
+    /// Reject moves into this mailbox, as a server would for a deleted folder.
+    reject_moves_to: Mutex<Option<String>>,
+    /// Report the next sync as a UIDVALIDITY change.
+    renumber_next: Mutex<bool>,
     /// Make `list_mailboxes` fail as if the password were wrong.
     bad_password: Mutex<bool>,
 }
@@ -56,8 +60,10 @@ impl MailBackend for Fake {
     }
     async fn sync_mailbox(&self, mailbox: &str, since: Option<&SyncState>, _: Option<u32>) -> Result<MailboxDelta> {
         let all = self.boxes.lock().unwrap().get(mailbox).cloned().unwrap_or_default();
+        let renumbered = std::mem::take(&mut *self.renumber_next.lock().unwrap());
         Ok(MailboxDelta {
-            full_resync: since.is_none(),
+            full_resync: since.is_none() || renumbered,
+            ids_invalidated: renumbered,
             present: Some(all.iter().map(|e| e.remote_id.clone()).collect()),
             added: all,
             new_state: SyncState("s".into()),
@@ -68,6 +74,7 @@ impl MailBackend for Fake {
         Ok(tern_core::mime::body_from_raw(format!("Subject: x\r\n\r\nbody of {rid}").into_bytes()))
     }
     async fn set_flags(&self, mb: &str, rids: &[String], flags: &Flags) -> Result<()> {
+        self.check_online()?;
         self.log.lock().unwrap().push(format!("flags {mb} {rids:?} seen={}", flags.seen));
         let mut boxes = self.boxes.lock().unwrap();
         for e in boxes.get_mut(mb).into_iter().flatten() {
@@ -78,6 +85,10 @@ impl MailBackend for Fake {
         Ok(())
     }
     async fn move_messages(&self, from: &str, rids: &[String], to: &str) -> Result<Vec<String>> {
+        self.check_online()?;
+        if self.reject_moves_to.lock().unwrap().as_deref() == Some(to) {
+            return Err(Error::Protocol(format!("NO [TRYCREATE] {to} does not exist")));
+        }
         self.log.lock().unwrap().push(format!("move {from}->{to} {rids:?}"));
         let mut boxes = self.boxes.lock().unwrap();
         let src = boxes.entry(from.into()).or_default();
@@ -91,6 +102,7 @@ impl MailBackend for Fake {
         Ok(None)
     }
     async fn expunge(&self, mb: &str) -> Result<()> {
+        self.check_online()?;
         self.log.lock().unwrap().push(format!("expunge {mb}"));
         Ok(())
     }
@@ -102,11 +114,23 @@ impl MailBackend for Fake {
     }
     async fn submit(&self, raw: &[u8], from: &str, rcpts: &[String]) -> Result<()> {
         assert!(!raw.is_empty());
+        self.check_online()?;
+        self.log.lock().unwrap().push(format!("submit {from} {rcpts:?}"));
+        Ok(())
+    }
+}
+
+impl Fake {
+    fn check_online(&self) -> Result<()> {
         if *self.offline.lock().unwrap() {
             return Err(Error::Network("offline".into()));
         }
-        self.log.lock().unwrap().push(format!("submit {from} {rcpts:?}"));
         Ok(())
+    }
+
+    fn server_flags(&self, mb: &str, rid: &str) -> Flags {
+        let boxes = self.boxes.lock().unwrap();
+        boxes[mb].iter().find(|e| e.remote_id == rid).unwrap().flags.clone()
     }
 }
 
@@ -331,4 +355,197 @@ async fn removed_account_is_not_resurrected_by_a_pending_reconnect() {
     engine.handle(Command::RemoveAccount(id));
     run_for(&mut engine, Duration::from_secs(60)).await;
     assert!(!engine.accounts.contains_key(&id));
+}
+
+fn errors(rx: &async_channel::Receiver<Event>) -> Vec<String> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|e| match e {
+            Event::Error { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn msg_id(e: &Engine, id: AccountId, rid: &str) -> MessageId {
+    let rows = e.store().list(&ListScope::Mailbox(inbox(e, id)), false, 50).unwrap();
+    rows.iter().find(|m| m.envelope.remote_id == rid).unwrap().id
+}
+
+#[test]
+fn ops_round_trip_as_json() {
+    let ops = [
+        Op::SetFlags {
+            mailbox: MailboxId(1),
+            mailbox_remote: "INBOX".into(),
+            items: vec![("7".into(), Flags { seen: true, ..Default::default() })],
+        },
+        Op::Move {
+            from: MailboxId(1),
+            from_remote: "INBOX".into(),
+            to: MailboxId(2),
+            to_remote: "Archive".into(),
+            remote_ids: vec!["7".into()],
+        },
+        Op::Destroy { mailbox: MailboxId(3), mailbox_remote: "Trash".into(), remote_ids: vec!["9".into()] },
+    ];
+    for op in ops {
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(serde_json::from_str::<Op>(&json).unwrap(), op);
+    }
+}
+
+#[tokio::test]
+async fn offline_change_is_kept_and_delivered_on_reconnect() {
+    let (mut engine, fake, rx, id) = setup().await;
+    while rx.try_recv().is_ok() {}
+    *fake.offline.lock().unwrap() = true;
+    let m = msg_id(&engine, id, "1");
+    engine.handle(Command::SetFlags(vec![m], FlagChange::Seen(true)));
+    engine.settle().await;
+    assert!(engine.store().message(m).unwrap().envelope.flags.seen, "stays read locally");
+    assert_eq!(engine.store().pending_ops(id).unwrap().len(), 1, "kept in the queue");
+    assert!(errors(&rx).is_empty(), "no toast while offline");
+    assert!(!fake.server_flags("INBOX", "1").seen);
+
+    *fake.offline.lock().unwrap() = false;
+    engine.handle(Command::SyncAll);
+    engine.settle().await;
+    assert!(fake.server_flags("INBOX", "1").seen, "delivered on reconnect");
+    assert!(engine.store().pending_ops(id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn rejected_op_rolls_back_and_later_ops_still_go_out() {
+    let (mut engine, fake, rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    let (m1, m2) = (msg_id(&engine, id, "1"), msg_id(&engine, id, "2"));
+    engine.handle(Command::Move(vec![m1], MoveTarget::Trash));
+    engine.handle(Command::SetFlags(vec![m2], FlagChange::Flag(Some(FlagColor::Red))));
+    engine.settle().await;
+    while rx.try_recv().is_ok() {}
+
+    // Back online, but the server now refuses moves into Trash.
+    *fake.offline.lock().unwrap() = false;
+    *fake.reject_moves_to.lock().unwrap() = Some("Trash".into());
+    engine.handle(Command::SyncAll);
+    engine.settle().await;
+    let errs = errors(&rx);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("Trash"));
+    let rows = engine.store().list(&ListScope::Mailbox(inbox(&engine, id)), false, 50).unwrap();
+    assert!(rows.iter().any(|r| r.envelope.remote_id == "1"), "moved message is back");
+    assert_eq!(fake.server_flags("INBOX", "2").flag, Some(FlagColor::Red), "later op delivered");
+    assert!(engine.store().pending_ops(id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn queued_ops_reach_the_server_in_order() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    let (m1, m2) = (msg_id(&engine, id, "1"), msg_id(&engine, id, "2"));
+    engine.handle(Command::SetFlags(vec![m1], FlagChange::Flag(Some(FlagColor::Blue))));
+    engine.handle(Command::Move(vec![m1], MoveTarget::Trash));
+    engine.handle(Command::SetFlags(vec![m2], FlagChange::Seen(true)));
+    engine.handle(Command::SetFlags(vec![m2], FlagChange::Seen(false)));
+    engine.settle().await;
+    fake.log.lock().unwrap().clear();
+
+    *fake.offline.lock().unwrap() = false;
+    engine.handle(Command::SyncAll);
+    engine.settle().await;
+    let log = fake.log.lock().unwrap().clone();
+    let pos = |needle: &str| log.iter().position(|l| l.starts_with(needle)).unwrap();
+    assert!(pos("flags INBOX [\"1\"]") < pos("move INBOX->Trash"), "{log:?}");
+    assert!(!fake.server_flags("INBOX", "2").seen, "read then unread ends unread");
+}
+
+#[tokio::test]
+async fn sync_does_not_revert_queued_changes() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    let (m1, m2) = (msg_id(&engine, id, "1"), msg_id(&engine, id, "2"));
+    engine.handle(Command::SetFlags(vec![m2], FlagChange::Seen(false))); // server still says read
+    engine.handle(Command::Move(vec![m1], MoveTarget::Trash));
+    engine.settle().await;
+
+    // Incremental sync: the server reports message 2 as read.
+    let inbox_id = inbox(&engine, id);
+    engine.handle(Command::SyncMailbox(inbox_id));
+    engine.settle().await;
+    let rows = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap();
+    assert!(!rows.iter().find(|r| r.envelope.remote_id == "2").unwrap().envelope.flags.seen, "still unread");
+
+    // Full re-download: message 1 is still on the server's INBOX.
+    engine.store_resync(inbox_id);
+    engine.settle().await;
+    let rows = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap();
+    assert!(!rows.iter().any(|r| r.envelope.remote_id == "1"), "queued move stays hidden");
+    assert!(!rows.iter().find(|r| r.envelope.remote_id == "2").unwrap().envelope.flags.seen);
+}
+
+#[tokio::test]
+async fn renumbered_mailbox_discards_its_queued_ops() {
+    let (mut engine, fake, rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::SetFlags(vec![msg_id(&engine, id, "1")], FlagChange::Flag(Some(FlagColor::Red))));
+    engine.settle().await;
+    while rx.try_recv().is_ok() {}
+
+    *fake.renumber_next.lock().unwrap() = true;
+    engine.handle(Command::SyncMailbox(inbox(&engine, id)));
+    engine.settle().await;
+    assert!(engine.store().pending_ops(id).unwrap().is_empty());
+    let errs = errors(&rx);
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(errs[0].contains("renumbered"));
+
+    *fake.offline.lock().unwrap() = false;
+    engine.handle(Command::SyncAll);
+    engine.settle().await;
+    assert_eq!(fake.server_flags("INBOX", "1").flag, None, "never applied to the renumbered mailbox");
+}
+
+#[tokio::test]
+async fn removing_an_account_discards_its_queue() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::SetFlags(vec![msg_id(&engine, id, "1")], FlagChange::Seen(true)));
+    engine.settle().await;
+    engine.handle(Command::RemoveAccount(id));
+    assert!(engine.store().pending_ops(id).unwrap().is_empty());
+    *fake.offline.lock().unwrap() = false;
+    engine.settle().await;
+    assert!(!fake.server_flags("INBOX", "1").seen);
+}
+
+#[tokio::test]
+async fn queued_ops_survive_a_restart() {
+    let path = std::env::temp_dir().join(format!("tern-restart-{}.db", uuid::Uuid::new_v4()));
+    let fake = Arc::new(Fake::default());
+    fake.boxes.lock().unwrap().insert("INBOX".into(), vec![env(1, "Hello", false)]);
+    let cfg = AccountConfig::preset(Provider::Fastmail, "Tom", "tom@x.com");
+    let id = cfg.id;
+    {
+        let (tx, _rx) = async_channel::unbounded();
+        let mut engine = Engine::new(Store::open(&path).unwrap(), tx);
+        engine.add(cfg.clone(), fake.clone());
+        engine.start_account(id);
+        engine.settle().await;
+        *fake.offline.lock().unwrap() = true;
+        engine.handle(Command::SetFlags(vec![msg_id(&engine, id, "1")], FlagChange::Seen(true)));
+        engine.settle().await;
+    } // Tern quits with the change still queued.
+
+    *fake.offline.lock().unwrap() = false;
+    let (tx, _rx) = async_channel::unbounded();
+    let mut engine = Engine::new(Store::open(&path).unwrap(), tx);
+    engine.add(cfg, fake.clone());
+    engine.start_account(id);
+    engine.settle().await;
+    assert!(fake.server_flags("INBOX", "1").seen, "delivered after restart");
+    assert!(engine.store().pending_ops(id).unwrap().is_empty());
+    drop(engine);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
 }

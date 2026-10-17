@@ -216,3 +216,37 @@ fn migrates_v1_outbox() {
     let v: i64 = s.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
     assert_eq!(v, SCHEMA_VERSION);
 }
+
+#[test]
+fn pending_ops_queue_in_order_per_account() {
+    let (mut s, acct, _, _) = setup();
+    let other = AccountId::new();
+    let a = s.pending_push(acct, "first").unwrap();
+    s.pending_push(other, "elsewhere").unwrap();
+    s.pending_push(acct, "second").unwrap();
+    let ops: Vec<String> = s.pending_ops(acct).unwrap().into_iter().map(|(_, op)| op).collect();
+    assert_eq!(ops, ["first", "second"]);
+    s.pending_done(a).unwrap();
+    assert_eq!(s.pending_ops(acct).unwrap()[0].1, "second");
+    s.pending_clear(acct).unwrap();
+    assert!(s.pending_ops(acct).unwrap().is_empty());
+    assert_eq!(s.pending_ops(other).unwrap().len(), 1, "other accounts untouched");
+}
+
+#[test]
+fn edit_rows_by_remote_id() {
+    let (mut s, _, inbox, _) = setup();
+    let delta = MailboxDelta {
+        added: vec![env("1", "<a@x>", None, "A", "Ann", 1), env("2", "<b@x>", None, "B", "Bob", 2)],
+        new_state: SyncState("s".into()),
+        ..Default::default()
+    };
+    s.apply_delta(inbox, &delta).unwrap();
+    let flagged = Flags { seen: true, flag: Some(FlagColor::Red), ..Default::default() };
+    s.set_flags_remote(inbox, "1", &flagged).unwrap();
+    s.set_flags_remote(inbox, "missing", &flagged).unwrap(); // not cached: no-op
+    s.delete_remote(inbox, &["2".to_string()]).unwrap();
+    let rows = s.list(&ListScope::Mailbox(inbox), false, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].envelope.flags, flagged);
+}

@@ -54,7 +54,7 @@ Key decisions:
 | JMAP push (EventSource) | ⬜ | polls every 2 min for now |
 | CONDSTORE / QRESYNC | ⬜ | big win for large mailboxes |
 | Gmail labels (X-GM-LABELS), hide All Mail dupes | ⬜ | labels currently appear as folders |
-| Offline queue for flag/move ops | 🟡 | `pending_ops` table exists; not replayed yet |
+| Offline queue for flag/move ops | ✅ | every action queued in `pending_ops`, delivered in order; spec: `openspec` `mail-actions` |
 | Download older mail on scroll | ⬜ | |
 | Multiple identities / aliases per account | ⬜ | |
 | Exchange / EWS | ⬜ | out of scope for now |
@@ -138,7 +138,9 @@ Key decisions:
      never dispatch a row that's already sending, record failed attempts (schema v2).
    - ✅ Rate-limit auth retries: first reconnect immediate, then 30 s doubling to 30 min;
      one reconnect at a time per account; failed rebuilds (OAuth refresh offline) retry too.
-   - ⬜ Replay `pending_ops` (offline flag/move).
+   - ✅ Replay `pending_ops`: every flag/move/delete is queued and delivered in order per
+     account; network/auth failures keep it, server rejections roll back; syncs don't revert
+     queued changes (OpenSpec change `replay-offline-actions`).
    - ⬜ Load older mail on scroll.
    - ⬜ CONDSTORE/QRESYNC.
    - ⬜ JMAP EventSource push.

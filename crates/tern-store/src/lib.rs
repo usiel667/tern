@@ -463,6 +463,37 @@ impl Store {
         Ok(())
     }
 
+    /// `set_flags` keyed by `(mailbox, remote_id)`; a no-op if the row isn't cached.
+    pub fn set_flags_remote(&mut self, mailbox: MailboxId, remote_id: &str, flags: &Flags) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE messages SET flags_json = ?3, seen = ?4, flagged = ?5
+                 WHERE mailbox = ?1 AND remote_id = ?2",
+                params![
+                    mailbox.0,
+                    remote_id,
+                    serde_json::to_string(flags).map_err(js)?,
+                    flags.seen,
+                    flags.flag.is_some()
+                ],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    /// `delete_local` keyed by `(mailbox, remote_id)`.
+    pub fn delete_remote(&mut self, mailbox: MailboxId, remote_ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction().map_err(db)?;
+        for rid in remote_ids {
+            tx.execute(
+                "DELETE FROM messages WHERE mailbox = ?1 AND remote_id = ?2",
+                params![mailbox.0, rid],
+            )
+            .map_err(db)?;
+        }
+        tx.commit().map_err(db)
+    }
+
     pub fn delete_local(&mut self, ids: &[MessageId]) -> Result<()> {
         let tx = self.conn.transaction().map_err(db)?;
         for id in ids {
@@ -552,6 +583,43 @@ impl Store {
 
     pub fn outbox_done(&mut self, id: i64) -> Result<()> {
         self.conn.execute("DELETE FROM outbox WHERE id = ?1", [id]).map_err(db)?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------- pending ops
+    // Queued message actions. `op` is opaque JSON owned by the sync engine.
+
+    pub fn pending_push(&mut self, account: AccountId, op: &str) -> Result<i64> {
+        self.conn
+            .execute(
+                "INSERT INTO pending_ops (account, op, created) VALUES (?1, ?2, ?3)",
+                params![account.to_string(), op, Utc::now().timestamp()],
+            )
+            .map_err(db)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// An account's queued ops, oldest first, as `(id, op)`.
+    pub fn pending_ops(&self, account: AccountId) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, op FROM pending_ops WHERE account = ?1 ORDER BY id")
+            .map_err(db)?;
+        stmt.query_map([account.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(db)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(db)
+    }
+
+    pub fn pending_done(&mut self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM pending_ops WHERE id = ?1", [id]).map_err(db)?;
+        Ok(())
+    }
+
+    pub fn pending_clear(&mut self, account: AccountId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM pending_ops WHERE account = ?1", [account.to_string()])
+            .map_err(db)?;
         Ok(())
     }
 

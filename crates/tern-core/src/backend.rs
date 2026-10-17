@@ -31,6 +31,11 @@ pub struct MailboxDelta {
     /// True when the cursor was invalid (e.g. UIDVALIDITY changed) and the
     /// caller must drop every cached message for this mailbox first.
     pub full_resync: bool,
+    /// True when the server invalidated the remote ids the client knew for this
+    /// mailbox (IMAP UIDVALIDITY changed since the previous cursor). Anything
+    /// still keyed by the old ids must be discarded. Not set for a resync the
+    /// client asked for by dropping its own cursor.
+    pub ids_invalidated: bool,
     pub new_state: SyncState,
 }
 

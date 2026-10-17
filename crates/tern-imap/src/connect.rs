@@ -23,6 +23,16 @@ pub(crate) fn proto(e: impl std::fmt::Display) -> Error {
     Error::Protocol(e.to_string())
 }
 
+/// Classify an error from an IMAP command. A dead connection is a network
+/// problem (worth retrying later); anything the server said (NO, BAD) or sent
+/// that we couldn't use is a protocol problem (retrying won't help).
+pub(crate) fn cmd(e: async_imap::error::Error) -> Error {
+    match e {
+        async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost => net(e),
+        e => proto(e),
+    }
+}
+
 fn tls_connector() -> TlsConnector {
     // Mozilla's roots plus the system store (/etc/ssl/certs on Arch), so
     // self-hosted servers signed by a locally trusted CA work too.
@@ -134,4 +144,20 @@ async fn read_line(tcp: &mut TcpStream) -> Result<String> {
         line.push(b);
     }
     Ok(String::from_utf8_lossy(&line).trim_end().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_imap::error::Error as ImapError;
+
+    #[test]
+    fn dead_connection_is_network_server_refusal_is_protocol() {
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        assert!(matches!(cmd(ImapError::Io(io)), Error::Network(_)));
+        assert!(matches!(cmd(ImapError::ConnectionLost), Error::Network(_)));
+        assert!(matches!(cmd(ImapError::No("[TRYCREATE] no such mailbox".into())), Error::Protocol(_)));
+        assert!(matches!(cmd(ImapError::Bad("syntax".into())), Error::Protocol(_)));
+        assert!(matches!(cmd(ImapError::Append), Error::Protocol(_)));
+    }
 }

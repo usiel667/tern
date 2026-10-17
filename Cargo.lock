@@ -3010,6 +3010,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "directories",
+ "serde",
+ "serde_json",
  "tern-auth",
  "tern-core",
  "tern-imap",

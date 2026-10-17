@@ -22,7 +22,7 @@ use tern_core::{Error, Result};
 use tokio::sync::Mutex;
 
 pub use connect::{Session, connect};
-use connect::{net, proto};
+use connect::{cmd, net};
 use state::ImapState;
 
 /// Items fetched for list rows: headers for threading + a body prefix for the preview.
@@ -153,10 +153,10 @@ impl MailBackend for ImapBackend {
             let names: Vec<_> = s
                 .list(Some(""), Some("*"))
                 .await
-                .map_err(proto)?
+                .map_err(cmd)?
                 .try_collect()
                 .await
-                .map_err(proto)?;
+                .map_err(cmd)?;
             Ok(names
                 .iter()
                 .map(|n| {
@@ -189,10 +189,13 @@ impl MailBackend for ImapBackend {
         limit: Option<u32>,
     ) -> Result<MailboxDelta> {
         self.with_session(async |s| {
-            let mb = s.select(mailbox).await.map_err(proto)?;
+            let mb = s.select(mailbox).await.map_err(cmd)?;
             let validity = mb.uid_validity.unwrap_or(0);
             let prev = since.and_then(|st| ImapState::decode(&st.0));
-            let mut delta = MailboxDelta::default();
+            let mut delta = MailboxDelta {
+                ids_invalidated: prev.as_ref().is_some_and(|p| p.uid_validity != validity),
+                ..Default::default()
+            };
 
             match prev.filter(|p| p.uid_validity == validity) {
                 // Initial sync, or the server renumbered the mailbox.
@@ -207,10 +210,10 @@ impl MailBackend for ImapBackend {
                         let fetches: Vec<Fetch> = s
                             .fetch(format!("{start}:*"), ENVELOPE_ITEMS)
                             .await
-                            .map_err(proto)?
+                            .map_err(cmd)?
                             .try_collect()
                             .await
-                            .map_err(proto)?;
+                            .map_err(cmd)?;
                         added = fetches.iter().filter_map(envelope_of).collect();
                     }
                     let uids = added.iter().filter_map(|e| e.remote_id.parse::<u32>().ok());
@@ -228,10 +231,10 @@ impl MailBackend for ImapBackend {
                     let fetches: Vec<Fetch> = s
                         .uid_fetch(format!("{}:*", p.high_uid + 1), ENVELOPE_ITEMS)
                         .await
-                        .map_err(proto)?
+                        .map_err(cmd)?
                         .try_collect()
                         .await
-                        .map_err(proto)?;
+                        .map_err(cmd)?;
                     for f in &fetches {
                         if f.uid.is_some_and(|u| u > p.high_uid)
                             && let Some(e) = envelope_of(f) {
@@ -244,10 +247,10 @@ impl MailBackend for ImapBackend {
                         let fetches: Vec<Fetch> = s
                             .uid_fetch(format!("{}:{}", p.low_uid, p.high_uid), "(UID FLAGS)")
                             .await
-                            .map_err(proto)?
+                            .map_err(cmd)?
                             .try_collect()
                             .await
-                            .map_err(proto)?;
+                            .map_err(cmd)?;
                         let mut present = Vec::with_capacity(fetches.len());
                         for f in &fetches {
                             if let Some(uid) = f.uid {
@@ -269,14 +272,14 @@ impl MailBackend for ImapBackend {
 
     async fn fetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
         self.with_session(async |s| {
-            s.select(mailbox).await.map_err(proto)?;
+            s.select(mailbox).await.map_err(cmd)?;
             let fetches: Vec<Fetch> = s
                 .uid_fetch(remote_id, "(UID BODY.PEEK[])")
                 .await
-                .map_err(proto)?
+                .map_err(cmd)?
                 .try_collect()
                 .await
-                .map_err(proto)?;
+                .map_err(cmd)?;
             let raw = fetches
                 .iter()
                 .find_map(|f| f.body())
@@ -293,22 +296,22 @@ impl MailBackend for ImapBackend {
         let set = flags.to_imap();
         let unset: Vec<&str> = MANAGED_FLAGS.iter().copied().filter(|f| !set.contains(f)).collect();
         self.with_session(async |s| {
-            s.select(mailbox).await.map_err(proto)?;
+            s.select(mailbox).await.map_err(cmd)?;
             let uids = uid_set(remote_ids);
             if !set.is_empty() {
                 s.uid_store(&uids, format!("+FLAGS.SILENT ({})", set.join(" ")))
                     .await
-                    .map_err(proto)?
+                    .map_err(cmd)?
                     .try_collect::<Vec<_>>()
                     .await
-                    .map_err(proto)?;
+                    .map_err(cmd)?;
             }
             s.uid_store(&uids, format!("-FLAGS.SILENT ({})", unset.join(" ")))
                 .await
-                .map_err(proto)?
+                .map_err(cmd)?
                 .try_collect::<Vec<_>>()
                 .await
-                .map_err(proto)?;
+                .map_err(cmd)?;
             Ok(())
         })
         .await
@@ -319,23 +322,23 @@ impl MailBackend for ImapBackend {
             return Ok(vec![]);
         }
         self.with_session(async |s| {
-            s.select(from).await.map_err(proto)?;
+            s.select(from).await.map_err(cmd)?;
             let uids = uid_set(remote_ids);
             if s.uid_mv(&uids, to).await.is_err() {
                 // Server without MOVE (RFC 6851): COPY, mark deleted, UID EXPUNGE.
-                s.uid_copy(&uids, to).await.map_err(proto)?;
+                s.uid_copy(&uids, to).await.map_err(cmd)?;
                 s.uid_store(&uids, "+FLAGS.SILENT (\\Deleted)")
                     .await
-                    .map_err(proto)?
+                    .map_err(cmd)?
                     .try_collect::<Vec<_>>()
                     .await
-                    .map_err(proto)?;
+                    .map_err(cmd)?;
                 s.uid_expunge(&uids)
                     .await
-                    .map_err(proto)?
+                    .map_err(cmd)?
                     .try_collect::<Vec<_>>()
                     .await
-                    .map_err(proto)?;
+                    .map_err(cmd)?;
             }
             // TODO: parse COPYUID from the tagged response to return new UIDs.
             Ok(vec![])
@@ -346,7 +349,7 @@ impl MailBackend for ImapBackend {
     async fn append(&self, mailbox: &str, raw: &[u8], flags: &Flags) -> Result<Option<String>> {
         let f = format!("({})", flags.to_imap().join(" "));
         self.with_session(async |s| {
-            s.append(mailbox, Some(&f), None, raw).await.map_err(proto)?;
+            s.append(mailbox, Some(&f), None, raw).await.map_err(cmd)?;
             Ok(None)
         })
         .await
@@ -354,13 +357,13 @@ impl MailBackend for ImapBackend {
 
     async fn expunge(&self, mailbox: &str) -> Result<()> {
         self.with_session(async |s| {
-            s.select(mailbox).await.map_err(proto)?;
+            s.select(mailbox).await.map_err(cmd)?;
             s.expunge()
                 .await
-                .map_err(proto)?
+                .map_err(cmd)?
                 .try_collect::<Vec<_>>()
                 .await
-                .map_err(proto)?;
+                .map_err(cmd)?;
             Ok(())
         })
         .await
@@ -372,7 +375,7 @@ impl MailBackend for ImapBackend {
             Some(s) => s,
             None => connect(&self.server, &self.cred).await?,
         };
-        session.select(mailbox).await.map_err(proto)?;
+        session.select(mailbox).await.map_err(cmd)?;
         let mut idle = session.idle();
         idle.init().await.map_err(net)?;
         let response = {

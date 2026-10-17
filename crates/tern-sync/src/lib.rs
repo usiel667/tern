@@ -22,6 +22,7 @@ use tern_core::model::*;
 use tern_core::{Error, Result};
 use tern_imap::ImapBackend;
 use tern_jmap::JmapBackend;
+use serde::{Deserialize, Serialize};
 use tern_store::Store;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -66,6 +67,61 @@ pub enum FlagChange {
     Forwarded,
 }
 
+/// A queued message action, stored as JSON in `pending_ops` until the server
+/// accepts it. Keyed by `(mailbox, remote id)` because message rows are deleted
+/// and re-inserted by syncs; flags are the full resulting set, so replay is idempotent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Op {
+    SetFlags { mailbox: MailboxId, mailbox_remote: String, items: Vec<(String, Flags)> },
+    Move { from: MailboxId, from_remote: String, to: MailboxId, to_remote: String, remote_ids: Vec<String> },
+    /// Permanent delete (deleting in Trash): \Deleted + EXPUNGE.
+    Destroy { mailbox: MailboxId, mailbox_remote: String, remote_ids: Vec<String> },
+}
+
+impl Op {
+    /// The mailbox the action is taken in (resynced if the server rejects it).
+    pub fn mailbox(&self) -> MailboxId {
+        match self {
+            Op::SetFlags { mailbox, .. } | Op::Destroy { mailbox, .. } => *mailbox,
+            Op::Move { from, .. } => *from,
+        }
+    }
+
+    async fn run(&self, backend: &dyn MailBackend) -> Result<()> {
+        match self {
+            Op::SetFlags { mailbox_remote, items, .. } => {
+                // Different messages may end with different flag sets; send each distinct set once.
+                let mut by_flags: Vec<(&Flags, Vec<String>)> = Vec::new();
+                for (rid, f) in items {
+                    match by_flags.iter_mut().find(|(g, _)| *g == f) {
+                        Some((_, v)) => v.push(rid.clone()),
+                        None => by_flags.push((f, vec![rid.clone()])),
+                    }
+                }
+                for (f, rids) in by_flags {
+                    backend.set_flags(mailbox_remote, &rids, f).await?;
+                }
+                Ok(())
+            }
+            Op::Move { from_remote, to_remote, remote_ids, .. } => {
+                backend.move_messages(from_remote, remote_ids, to_remote).await.map(|_| ())
+            }
+            Op::Destroy { mailbox_remote, remote_ids, .. } => {
+                let deleted = Flags { deleted: true, seen: true, ..Default::default() };
+                backend.set_flags(mailbox_remote, remote_ids, &deleted).await?;
+                backend.expunge(mailbox_remote).await
+            }
+        }
+    }
+}
+
+/// Errors that mean "couldn't reach the server" rather than "the server said no":
+/// the op stays queued and is retried on the next successful contact.
+fn keeps_op(e: &Error) -> bool {
+    matches!(e, Error::Network(_) | Error::Auth(_) | Error::Storage(_))
+}
+
 #[derive(Debug)]
 pub enum Command {
     /// "Get Mail" (⇧⌘N).
@@ -108,6 +164,8 @@ enum Internal {
     Body(MessageId, MessageBody),
     Push(AccountId, PushEvent),
     Sent { outbox_id: i64, account: AccountId, responding_to: Option<(MessageId, FlagChange)> },
+    /// A queued message action finished (or failed) on the server.
+    OpDone { account: AccountId, id: i64, op: Op, result: Result<()> },
     /// A queued send failed; it stays in the outbox for the next flush.
     SendFailed { outbox_id: i64, account: AccountId, error: Error },
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
@@ -116,7 +174,9 @@ enum Internal {
     AccountReady { cfg: AccountConfig, backend: Arc<dyn MailBackend>, reconnect: bool },
     /// Building the backend failed (keyring, OAuth refresh); try again later.
     ReconnectFailed(AccountConfig, Error),
-    /// A task finished with nothing to report.
+    /// A task finished with nothing to report. (Unused right now; kept as the
+    /// documented return for `spawn_task` futures, see CLAUDE.md.)
+    #[allow(dead_code)]
     Nothing,
     Done(AccountId),
 }
@@ -210,6 +270,8 @@ pub struct Engine {
     sending: std::collections::HashSet<i64>,
     auth_retry: HashMap<AccountId, AuthRetry>,
     connect: Connect,
+    /// Accounts with a queued op in flight; ops run one at a time per account.
+    draining: std::collections::HashSet<AccountId>,
 }
 
 impl Engine {
@@ -242,6 +304,7 @@ impl Engine {
             sending: Default::default(),
             auth_retry: Default::default(),
             connect: Arc::new(|cfg| Box::pin(async move { backend_for(&cfg).await })),
+            draining: Default::default(),
         }
     }
 
@@ -461,25 +524,8 @@ impl Engine {
         }
         self.emit(Event::MessagesChanged(None));
         self.emit(Event::MailboxesChanged); // unread / flagged badges
-        for ((account, mb_remote, mailbox), items) in groups {
-            let Some(acct) = self.accounts.get(&account) else { continue };
-            let backend = acct.backend.clone();
-            self.spawn_task(account, async move {
-                // Different messages may end with different flag sets; send each distinct set once.
-                let mut by_flags: Vec<(Flags, Vec<String>)> = Vec::new();
-                for (rid, f) in items {
-                    match by_flags.iter_mut().find(|(g, _)| *g == f) {
-                        Some((_, v)) => v.push(rid),
-                        None => by_flags.push((f, vec![rid])),
-                    }
-                }
-                for (f, rids) in by_flags {
-                    if let Err(error) = backend.set_flags(&mb_remote, &rids, &f).await {
-                        return Internal::Failed { account: Some(account), mailbox: Some(mailbox), error };
-                    }
-                }
-                Internal::Nothing
-            });
+        for ((account, mailbox_remote, mailbox), items) in groups {
+            self.enqueue(account, Op::SetFlags { mailbox, mailbox_remote, items });
         }
     }
 
@@ -491,6 +537,7 @@ impl Engine {
             groups.entry((account, mb_remote, msg.mailbox)).or_default().push((*id, rid));
         }
         let mut local_delete = Vec::new();
+        let mut ops = Vec::new();
         for ((account, from_remote, from_id), items) in groups {
             let dest = match target {
                 MoveTarget::Mailbox(m) => self.store.mailbox(m).ok(),
@@ -513,35 +560,126 @@ impl Engine {
             if dest.id == from_id && !permanent {
                 continue;
             }
-            let Some(acct) = self.accounts.get(&account) else { continue };
-            let backend = acct.backend.clone();
-            let dest_remote = dest.remote.remote_id.clone();
-            let rids: Vec<String> = items.iter().map(|(_, r)| r.clone()).collect();
+            let remote_ids: Vec<String> = items.iter().map(|(_, r)| r.clone()).collect();
             local_delete.extend(items.iter().map(|(id, _)| *id));
-            self.spawn_task(account, async move {
-                let r = if permanent {
-                    let deleted = Flags { deleted: true, seen: true, ..Default::default() };
-                    match backend.set_flags(&from_remote, &rids, &deleted).await {
-                        Ok(()) => backend.expunge(&from_remote).await,
-                        Err(e) => Err(e),
-                    }
+            ops.push((
+                account,
+                if permanent {
+                    Op::Destroy { mailbox: from_id, mailbox_remote: from_remote, remote_ids }
                 } else {
-                    backend.move_messages(&from_remote, &rids, &dest_remote).await.map(|_| ())
-                };
-                match r {
-                    // Pull the destination so the moved mail shows up there.
-                    Ok(()) if !permanent => Internal::Push(account, PushEvent::MailboxChanged { remote_id: dest_remote }),
-                    Ok(()) => Internal::Nothing,
-                    // The local copy is already gone; resync the source to restore it.
-                    Err(error) => Internal::Failed { account: Some(account), mailbox: Some(from_id), error },
-                }
-            });
+                    Op::Move {
+                        from: from_id,
+                        from_remote,
+                        to: dest.id,
+                        to_remote: dest.remote.remote_id.clone(),
+                        remote_ids,
+                    }
+                },
+            ));
         }
         if let Err(e) = self.store.delete_local(&local_delete) {
             self.fail(None, e);
         }
         self.emit(Event::MessagesChanged(None));
         self.emit(Event::MailboxesChanged);
+        for (account, op) in ops {
+            self.enqueue(account, op);
+        }
+    }
+
+    /// Queue an action durably, then try to deliver the account's queue.
+    fn enqueue(&mut self, account: AccountId, op: Op) {
+        let json = match serde_json::to_string(&op) {
+            Ok(j) => j,
+            Err(e) => return self.fail(Some(account), e),
+        };
+        if let Err(e) = self.store.pending_push(account, &json) {
+            return self.fail(Some(account), e);
+        }
+        self.drain(account);
+    }
+
+    /// The account's queued ops in order, skipping any that don't parse.
+    fn queued_ops(&self, account: AccountId) -> Vec<(i64, Op)> {
+        self.store
+            .pending_ops(account)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, json)| serde_json::from_str(&json).ok().map(|op| (id, op)))
+            .collect()
+    }
+
+    /// Re-apply queued ops for `mailbox` over fresh server data, so a sync doesn't
+    /// revert changes the server hasn't received yet.
+    fn overlay_pending(&mut self, account: AccountId, mailbox: MailboxId) {
+        for (_, op) in self.queued_ops(account) {
+            if op.mailbox() != mailbox {
+                continue;
+            }
+            let r = match &op {
+                Op::SetFlags { items, .. } => items
+                    .iter()
+                    .try_for_each(|(rid, f)| self.store.set_flags_remote(mailbox, rid, f)),
+                Op::Move { remote_ids, .. } | Op::Destroy { remote_ids, .. } => {
+                    self.store.delete_remote(mailbox, remote_ids)
+                }
+            };
+            if let Err(e) = r {
+                self.fail(Some(account), e);
+            }
+        }
+    }
+
+    /// The server renumbered `mailbox`: queued ops there point at the wrong
+    /// messages now, so drop them rather than apply them.
+    fn discard_ops_for(&mut self, account: AccountId, mailbox: MailboxId) {
+        let stale: Vec<i64> = self
+            .queued_ops(account)
+            .into_iter()
+            .filter(|(_, op)| op.mailbox() == mailbox)
+            .map(|(id, _)| id)
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for id in &stale {
+            let _ = self.store.pending_done(*id);
+        }
+        let name = self.store.mailbox(mailbox).map(|m| m.remote.name).unwrap_or_default();
+        self.fail(
+            Some(account),
+            format!(
+                "{} queued change(s) in {name} were discarded because the server renumbered its messages",
+                stale.len()
+            ),
+        );
+    }
+
+    /// Send the account's oldest queued op, unless one is already in flight.
+    /// `OpDone` continues with the next one.
+    fn drain(&mut self, account: AccountId) {
+        if self.draining.contains(&account) {
+            return;
+        }
+        let Some(backend) = self.accounts.get(&account).map(|a| a.backend.clone()) else { return };
+        let next = match self.store.pending_ops(account) {
+            Ok(ops) => ops.into_iter().next(),
+            Err(e) => return self.fail(Some(account), e),
+        };
+        let Some((id, json)) = next else { return };
+        let op: Op = match serde_json::from_str(&json) {
+            Ok(op) => op,
+            Err(e) => {
+                warn!(%account, "dropping unreadable queued op {id}: {e}");
+                let _ = self.store.pending_done(id);
+                return self.drain(account);
+            }
+        };
+        self.draining.insert(account);
+        self.spawn_task(account, async move {
+            let result = op.run(backend.as_ref()).await;
+            Internal::OpDone { account, id, op, result }
+        });
     }
 
     fn send(&mut self, account: AccountId, mut draft: Draft, responding_to: Option<(MessageId, FlagChange)>) {
@@ -682,6 +820,10 @@ impl Engine {
     fn remove_account(&mut self, id: AccountId) {
         self.accounts.remove(&id);
         self.auth_retry.remove(&id);
+        self.draining.remove(&id);
+        if let Err(e) = self.store.pending_clear(id) {
+            self.fail(Some(id), e);
+        }
         if let Some(paths) = &self.paths {
             let mut file = paths.load_accounts().unwrap_or_default();
             file.accounts.retain(|a| a.id != id);
@@ -717,6 +859,8 @@ impl Engine {
                 for mb in boxes.into_iter().filter(|m| m.remote.selectable) {
                     self.sync_mailbox(mb.id);
                 }
+                // The server is reachable: deliver anything queued while it wasn't.
+                self.drain(account);
             }
             Internal::Delta(account, mailbox, delta) => {
                 self.syncing.remove(&mailbox);
@@ -734,6 +878,10 @@ impl Engine {
                 if let Err(e) = self.store.apply_delta(mailbox, &delta) {
                     return self.fail(Some(account), e);
                 }
+                if delta.ids_invalidated {
+                    self.discard_ops_for(account, mailbox);
+                }
+                self.overlay_pending(account, mailbox);
                 self.emit(Event::MessagesChanged(Some(mailbox)));
                 self.emit(Event::MailboxesChanged);
                 if is_inbox && !initial && !new_unseen.is_empty() {
@@ -795,6 +943,39 @@ impl Engine {
                 }
                 if self.schedule_reconnect(account) {
                     self.fail(Some(account), error);
+                }
+            }
+            Internal::OpDone { account, id, op, result } => {
+                self.draining.remove(&account);
+                match result {
+                    Ok(()) => {
+                        let _ = self.store.pending_done(id);
+                        // Pull the destination so the moved mail shows up there.
+                        if let Op::Move { to, .. } = op {
+                            self.sync_mailbox(to);
+                        }
+                        self.drain(account);
+                    }
+                    // Unreachable: keep it queued; the next successful contact retries.
+                    Err(e) if keeps_op(&e) => {
+                        info!(%account, "queued change kept for later: {e}");
+                        match e {
+                            Error::Auth(_) => {
+                                if self.schedule_reconnect(account) {
+                                    self.fail(Some(account), e);
+                                }
+                            }
+                            Error::Storage(_) => self.fail(Some(account), e),
+                            _ => {}
+                        }
+                    }
+                    // Rejected: drop it, put the mailbox back as the server has it, carry on.
+                    Err(e) => {
+                        let _ = self.store.pending_done(id);
+                        self.store_resync(op.mailbox());
+                        self.fail(Some(account), e);
+                        self.drain(account);
+                    }
                 }
             }
             Internal::Nothing => {}

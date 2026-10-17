@@ -13,6 +13,22 @@ grim -g "X,Y WxH" shot.png                           # screenshot a window (geom
 
 ---
 
+## 2026-10-16 — IMAP reported a dropped connection as a protocol error
+
+**Seen (while designing the offline queue):** every IMAP command error went through
+`map_err(proto)`, so a connection lost mid-command (`async_imap::Error::Io` /
+`ConnectionLost`) became `Error::Protocol`, the same as a server `NO`/`BAD`. The engine
+couldn't tell "offline, retry later" from "the server refused", so offline actions would
+have been rolled back instead of queued.
+
+**Fix:** `connect::cmd` classifies command errors: `Io` and `ConnectionLost` →
+`Error::Network`, everything else → `Error::Protocol`. All command call sites in
+`tern-imap/src/lib.rs` use it. Test: `dead_connection_is_network_server_refusal_is_protocol`.
+
+**Status:** fixed.
+
+---
+
 ## 2026-10-16 — Wrong password made the engine reconnect in a tight loop
 
 **Seen (code review, milestone 2):** any `Error::Auth` rebuilt the backend immediately,
