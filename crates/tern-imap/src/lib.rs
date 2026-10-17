@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use tern_auth::Credential;
 use tern_core::account::ServerConfig;
-use tern_core::backend::{MailBackend, MailboxDelta, PushEvent, SyncState};
+use tern_core::backend::{MailBackend, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
 use tern_core::mime::{body_from_raw, envelope_from_parts};
 use tern_core::model::{Envelope, Flags, MailboxRole, MessageBody, RemoteMailbox};
 use tern_core::{Error, Result};
@@ -140,6 +140,16 @@ fn envelope_of(f: &Fetch) -> Option<Envelope> {
 
 fn uid_set(ids: &[String]) -> String {
     ids.join(",")
+}
+
+/// From UID SEARCH results, the newest `count` UIDs below `low_uid` (ascending),
+/// and whether older ones remain after them.
+fn next_older(found: impl IntoIterator<Item = u32>, low_uid: u32, count: usize) -> (Vec<u32>, bool) {
+    let mut older: Vec<u32> = found.into_iter().filter(|&u| u < low_uid).collect();
+    older.sort_unstable();
+    let more = older.len() > count;
+    let pick = older.split_off(older.len().saturating_sub(count));
+    (pick, more)
 }
 
 #[async_trait]
@@ -317,6 +327,46 @@ impl MailBackend for ImapBackend {
         .await
     }
 
+    async fn fetch_older(&self, mailbox: &str, since: &SyncState, _: &OlderFrom, count: u32) -> Result<OlderBatch> {
+        let unchanged = |more| OlderBatch {
+            delta: MailboxDelta { new_state: since.clone(), ..Default::default() },
+            more,
+        };
+        // No cursor yet: the next regular sync sets one.
+        let Some(prev) = ImapState::decode(&since.0) else { return Ok(unchanged(true)) };
+        if prev.low_uid <= 1 {
+            return Ok(unchanged(false));
+        }
+        self.with_session(async |s| {
+            let mb = s.select(mailbox).await.map_err(cmd)?;
+            if mb.uid_validity.unwrap_or(0) != prev.uid_validity {
+                // Renumbered: the next regular sync does the full resync.
+                return Ok(unchanged(true));
+            }
+            let found = s.uid_search(format!("UID 1:{}", prev.low_uid - 1)).await.map_err(cmd)?;
+            let (uids, more) = next_older(found, prev.low_uid, count as usize);
+            let Some(&low) = uids.first() else { return Ok(unchanged(false)) };
+            let set = uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let fetches: Vec<Fetch> = s
+                .uid_fetch(set, ENVELOPE_ITEMS)
+                .await
+                .map_err(cmd)?
+                .try_collect()
+                .await
+                .map_err(cmd)?;
+            let st = ImapState { low_uid: low, ..prev };
+            Ok(OlderBatch {
+                delta: MailboxDelta {
+                    added: fetches.iter().filter_map(envelope_of).collect(),
+                    new_state: SyncState(st.encode()),
+                    ..Default::default()
+                },
+                more,
+            })
+        })
+        .await
+    }
+
     async fn move_messages(&self, from: &str, remote_ids: &[String], to: &str) -> Result<Vec<String>> {
         if remote_ids.is_empty() {
             return Ok(vec![]);
@@ -404,5 +454,19 @@ mod tests {
         assert_eq!(role_for("INBOX.Trash", &[]), MailboxRole::Trash);
         assert_eq!(role_for("Deleted Messages", &[]), MailboxRole::Trash);
         assert_eq!(role_for("Receipts", &[]), MailboxRole::Custom);
+    }
+
+    #[test]
+    fn next_older_picks_the_newest_below_the_window() {
+        // Fewer than asked for: all of them, nothing left.
+        assert_eq!(next_older([3, 1, 2], 10, 5), (vec![1, 2, 3], false));
+        // Exactly the count: all of them, nothing left.
+        assert_eq!(next_older([1, 2, 3], 10, 3), (vec![1, 2, 3], false));
+        // More than the count: the newest ones, more remain.
+        assert_eq!(next_older([1, 5, 2, 4, 3], 10, 2), (vec![4, 5], true));
+        // UIDs at or above the window (a sloppy server) are ignored.
+        assert_eq!(next_older([2, 10, 11], 10, 5), (vec![2], false));
+        // Window already starts at UID 1.
+        assert_eq!(next_older([1], 1, 5), (vec![], false));
     }
 }

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tern_core::backend::{MailBackend, MailboxDelta, PushEvent, SyncState};
+use tern_core::backend::{MailBackend, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
 use tern_core::mime::body_from_raw;
 use tern_core::model::{Address, Envelope, Flags, MailboxRole, MessageBody, RemoteMailbox};
 use tern_core::{Error, Result};
@@ -127,6 +127,19 @@ impl JmapBackend {
                 }
             })
             .collect()
+    }
+
+    /// `Email/query` + `Email/get` for the batch below the cached part of a mailbox.
+    async fn older_call(&self, account: &str, mailbox: &str, from: &OlderFrom, count: u32, anchored: bool) -> Result<Vec<Value>> {
+        self.call(vec![
+            ("Email/query", older_query(account, mailbox, from, count, anchored)),
+            ("Email/get", json!({
+                "accountId": account,
+                "#ids": { "resultOf": "c0", "name": "Email/query", "path": "/ids" },
+                "properties": EMAIL_PROPS,
+            })),
+        ])
+        .await
     }
 
     async fn account(&self) -> Result<String> {
@@ -365,6 +378,26 @@ impl MailBackend for JmapBackend {
         Ok(())
     }
 
+    async fn fetch_older(&self, mailbox: &str, since: &SyncState, from: &OlderFrom, count: u32) -> Result<OlderBatch> {
+        let account = self.account().await?;
+        let r = match self.older_call(&account, mailbox, from, count, true).await {
+            // The oldest cached message was deleted meanwhile: page by position instead.
+            Err(Error::Protocol(msg)) if msg.contains("anchorNotFound") => {
+                self.older_call(&account, mailbox, from, count, false).await?
+            }
+            r => r?,
+        };
+        Ok(OlderBatch {
+            more: older_more(&r[0]),
+            // Email/changes already covers every message, so the cursor doesn't move.
+            delta: MailboxDelta {
+                added: r[1]["list"].as_array().into_iter().flatten().filter_map(envelope_of).collect(),
+                new_state: since.clone(),
+                ..Default::default()
+            },
+        })
+    }
+
     async fn move_messages(&self, from: &str, remote_ids: &[String], to: &str) -> Result<Vec<String>> {
         let patch = json!({ format!("mailboxIds/{from}"): null, format!("mailboxIds/{to}"): true });
         let update: Map<String, Value> =
@@ -447,6 +480,33 @@ impl MailBackend for JmapBackend {
     }
 }
 
+/// Query for messages older than the cached ones: anchored just past the oldest
+/// cached message, or (if that one is gone) by how many are cached.
+fn older_query(account: &str, mailbox: &str, from: &OlderFrom, count: u32, anchored: bool) -> Value {
+    let mut q = json!({
+        "accountId": account,
+        "filter": { "inMailbox": mailbox },
+        "sort": [{ "property": "receivedAt", "isAscending": false }],
+        "limit": count,
+        "calculateTotal": true,
+    });
+    match (&from.oldest_remote_id, anchored) {
+        (Some(id), true) => {
+            q["anchor"] = json!(id);
+            q["anchorOffset"] = json!(1);
+        }
+        _ => q["position"] = json!(from.cached),
+    }
+    q
+}
+
+/// Whether messages remain beyond an `Email/query` page.
+fn older_more(query: &Value) -> bool {
+    let position = query["position"].as_u64().unwrap_or(0);
+    let returned = query["ids"].as_array().map_or(0, |ids| ids.len() as u64);
+    query["total"].as_u64().is_some_and(|total| position + returned < total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +528,28 @@ mod tests {
         assert!(env.flags.seen);
         assert_eq!(env.flags.flag, Some(FlagColor::Blue));
         assert_eq!(env.date.timestamp(), 1791993600);
+    }
+
+    #[test]
+    fn older_query_anchors_past_the_oldest_cached() {
+        let from = OlderFrom { oldest_remote_id: Some("M9".into()), cached: 40 };
+        let q = older_query("A1", "INBOX-ID", &from, 250, true);
+        assert_eq!(q["anchor"], "M9");
+        assert_eq!(q["anchorOffset"], 1);
+        assert_eq!(q["limit"], 250);
+        assert_eq!(q["filter"]["inMailbox"], "INBOX-ID");
+        assert!(q.get("position").is_none());
+        // Fallback when the anchor is gone.
+        let q = older_query("A1", "INBOX-ID", &from, 250, false);
+        assert_eq!(q["position"], 40);
+        assert!(q.get("anchor").is_none());
+    }
+
+    #[test]
+    fn older_more_from_position_and_total() {
+        assert!(older_more(&json!({ "position": 40, "ids": ["a", "b"], "total": 100 })));
+        assert!(!older_more(&json!({ "position": 98, "ids": ["a", "b"], "total": 100 })));
+        assert!(!older_more(&json!({ "position": 0, "ids": [], "total": 0 })));
+        assert!(!older_more(&json!({ "position": 0, "ids": ["a"] })), "no total: assume done");
     }
 }

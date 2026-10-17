@@ -39,6 +39,24 @@ pub struct MailboxDelta {
     pub new_state: SyncState,
 }
 
+/// Where the cached part of a mailbox ends, for [`MailBackend::fetch_older`].
+#[derive(Debug, Clone, Default)]
+pub struct OlderFrom {
+    /// Remote id of the oldest message cached for this mailbox.
+    pub oldest_remote_id: Option<String>,
+    /// How many messages of this mailbox are cached.
+    pub cached: u32,
+}
+
+/// A batch of older messages: `delta` carries only `added` and `new_state`
+/// (never `present`, so nothing cached is removed).
+#[derive(Debug, Clone, Default)]
+pub struct OlderBatch {
+    pub delta: MailboxDelta,
+    /// The server has messages older than this batch.
+    pub more: bool,
+}
+
 /// Something happened on the server that the engine should react to.
 #[derive(Debug, Clone)]
 pub enum PushEvent {
@@ -87,6 +105,21 @@ pub trait MailBackend: Send + Sync {
         mailbox: &str,
         timeout: std::time::Duration,
     ) -> Result<Option<PushEvent>>;
+
+    /// Download up to `count` messages older than the cached part of `mailbox`
+    /// (scrolling back through history). The default has nothing older.
+    async fn fetch_older(
+        &self,
+        _mailbox: &str,
+        since: &SyncState,
+        _from: &OlderFrom,
+        _count: u32,
+    ) -> Result<OlderBatch> {
+        Ok(OlderBatch {
+            delta: MailboxDelta { new_state: since.clone(), ..Default::default() },
+            more: false,
+        })
+    }
 
     /// Whether this backend submits mail itself (JMAP) rather than via SMTP.
     fn handles_submission(&self) -> bool {

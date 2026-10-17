@@ -250,3 +250,16 @@ fn edit_rows_by_remote_id() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].envelope.flags, flagged);
 }
+
+#[test]
+fn oldest_cached_reports_where_history_ends() {
+    let (mut s, _, inbox, _) = setup();
+    assert_eq!(s.oldest_cached(inbox).unwrap(), (None, 0));
+    let delta = MailboxDelta {
+        added: vec![env("7", "<a@x>", None, "A", "Ann", 5), env("3", "<b@x>", None, "B", "Bob", 2)],
+        new_state: SyncState("s".into()),
+        ..Default::default()
+    };
+    s.apply_delta(inbox, &delta).unwrap();
+    assert_eq!(s.oldest_cached(inbox).unwrap(), (Some("3".to_string()), 2));
+}

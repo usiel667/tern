@@ -1,11 +1,14 @@
 //! The middle pane: search field, message rows, empty/welcome states.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
-use tern_core::model::{MessageId, MessageSummary};
+use tern_core::model::{MailboxId, MessageId, MessageSummary};
 use tern_core::search::SearchQuery;
+use tern_store::ListScope;
+use tern_sync::Command;
 
 use crate::app::Ui;
 use crate::format::list_date;
@@ -24,7 +27,15 @@ pub struct MessageList {
     spinner: gtk::Spinner,
     sync_btn: gtk::Button,
     welcome_btn: gtk::Button,
+    scroller: gtk::ScrolledWindow,
+    /// How many rows to load from the cache; grows as you scroll down.
+    limit: Cell<u32>,
+    /// The last reload hit `limit`, so the cache has more rows to show.
+    more_cached: Cell<bool>,
 }
+
+/// Rows loaded per page of the cached list.
+const PAGE: u32 = 500;
 
 /// Widgets of one row, stored on the row's root box.
 struct RowWidgets {
@@ -134,7 +145,15 @@ impl MessageList {
             spinner,
             sync_btn,
             welcome_btn,
+            scroller,
+            limit: Cell::new(PAGE),
+            more_cached: Cell::new(false),
         }
+    }
+
+    /// Back to the first page (new view or search).
+    pub fn reset_paging(&self) {
+        self.limit.set(PAGE);
     }
 
     pub fn focus_search(&self) {
@@ -158,6 +177,51 @@ fn item_summary(obj: &glib::Object) -> Option<MessageSummary> {
         .map(|b| b.borrow::<MessageSummary>().clone())
 }
 
+/// Scrolled to the bottom: show more of the cache, or once it's all shown, ask
+/// the engine for older mail in the mailboxes behind this view. Searches and
+/// smart views that aren't mailboxes (Flagged, Unread) don't download.
+pub fn load_more(ui: &Rc<Ui>) {
+    if !ui.query.borrow().trim().is_empty() {
+        return;
+    }
+    if ui.list.more_cached.get() {
+        ui.list.limit.set(ui.list.limit.get() + PAGE);
+        ui.reload_list();
+        return;
+    }
+    let boxes: Vec<MailboxId> = match &*ui.scope.borrow() {
+        ListScope::Mailbox(m) => vec![*m],
+        ListScope::Role(role) => ui
+            .store
+            .borrow()
+            .mailboxes(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| m.remote.role == *role && m.remote.selectable)
+            .map(|m| m.id)
+            .collect(),
+        _ => vec![],
+    };
+    if !boxes.is_empty() {
+        // Make room so the downloaded batch shows up without another scroll.
+        ui.list.limit.set(ui.list.limit.get() + PAGE);
+        ui.send(Command::LoadOlder(boxes));
+    }
+}
+
+/// Cached message and unread counts for a mailbox or unified view.
+fn view_totals(ui: &Ui, scope: &ListScope) -> (usize, usize) {
+    let boxes = ui.store.borrow().mailboxes(None).unwrap_or_default();
+    boxes
+        .iter()
+        .filter(|m| match scope {
+            ListScope::Mailbox(id) => m.id == *id,
+            ListScope::Role(role) => m.remote.role == *role,
+            _ => false,
+        })
+        .fold((0, 0), |(t, u), m| (t + m.total as usize, u + m.unread as usize))
+}
+
 /// Rows currently selected (in list order).
 pub fn selected(ui: &Ui) -> Vec<MessageSummary> {
     let sel = &ui.list.selection;
@@ -178,7 +242,7 @@ pub fn reload(ui: &Rc<Ui>) {
     let rows = {
         let store = ui.store.borrow();
         if query.trim().is_empty() {
-            store.list(&scope, ui.conversations.get(), 2000)
+            store.list(&scope, ui.conversations.get(), ui.list.limit.get())
         } else {
             store.search(&SearchQuery::parse(&query), &scope, 500)
         }
@@ -190,6 +254,7 @@ pub fn reload(ui: &Rc<Ui>) {
             vec![]
         }
     };
+    ui.list.more_cached.set(query.trim().is_empty() && rows.len() as u32 >= ui.list.limit.get());
     if ui.list.unread_btn.is_active() {
         rows.retain(|m| !m.envelope.flags.seen);
     }
@@ -204,8 +269,13 @@ pub fn reload(ui: &Rc<Ui>) {
         }
     }
 
-    let unread = rows.iter().filter(|m| !m.envelope.flags.seen).count();
-    let subtitle = match (rows.len(), unread) {
+    // The real size of a mailbox view, not just the rows paged in so far.
+    let filtered = !query.trim().is_empty() || ui.list.unread_btn.is_active();
+    let (total, unread) = match &scope {
+        ListScope::Mailbox(_) | ListScope::Role(_) if !filtered => view_totals(ui, &scope),
+        _ => (rows.len(), rows.iter().filter(|m| !m.envelope.flags.seen).count()),
+    };
+    let subtitle = match (total, unread) {
         (0, _) => String::new(),
         (n, 0) => format!("{n} messages"),
         (n, u) => format!("{n} messages, {u} unread"),
@@ -468,12 +538,24 @@ pub fn connect(ui: &Rc<Ui>) {
         });
     }
 
+    {
+        let weak = Rc::downgrade(ui);
+        list.scroller.connect_edge_reached(move |_, pos| {
+            if pos == gtk::PositionType::Bottom
+                && let Some(ui) = weak.upgrade()
+            {
+                load_more(&ui);
+            }
+        });
+    }
+
     // Search as you type (debounced by the entry's search-changed delay).
     {
         let weak = Rc::downgrade(ui);
         list.search.connect_search_changed(move |e| {
             let Some(ui) = weak.upgrade() else { return };
             *ui.query.borrow_mut() = e.text().to_string();
+            ui.list.reset_paging();
             ui.reload_list();
         });
     }

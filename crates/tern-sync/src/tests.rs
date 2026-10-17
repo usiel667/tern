@@ -17,6 +17,11 @@ struct Fake {
     reject_moves_to: Mutex<Option<String>>,
     /// Report the next sync as a UIDVALIDITY change.
     renumber_next: Mutex<bool>,
+    /// When set, syncs only return the newest N messages (a cached window);
+    /// `fetch_older` extends it. The cursor is `w:<window size>`.
+    window: Mutex<Option<usize>>,
+    /// Make `fetch_older` fail with a protocol error.
+    older_rejects: Mutex<bool>,
     /// Make `list_mailboxes` fail as if the password were wrong.
     bad_password: Mutex<bool>,
 }
@@ -61,13 +66,38 @@ impl MailBackend for Fake {
     async fn sync_mailbox(&self, mailbox: &str, since: Option<&SyncState>, _: Option<u32>) -> Result<MailboxDelta> {
         let all = self.boxes.lock().unwrap().get(mailbox).cloned().unwrap_or_default();
         let renumbered = std::mem::take(&mut *self.renumber_next.lock().unwrap());
+        let (visible, state) = match *self.window.lock().unwrap() {
+            None => (all, "s".to_string()),
+            Some(initial) => {
+                let n = window_of(since).unwrap_or(initial).min(all.len());
+                (all[all.len() - n..].to_vec(), format!("w:{n}"))
+            }
+        };
         Ok(MailboxDelta {
             full_resync: since.is_none() || renumbered,
             ids_invalidated: renumbered,
-            present: Some(all.iter().map(|e| e.remote_id.clone()).collect()),
-            added: all,
-            new_state: SyncState("s".into()),
+            present: Some(visible.iter().map(|e| e.remote_id.clone()).collect()),
+            added: visible,
+            new_state: SyncState(state),
             ..Default::default()
+        })
+    }
+    async fn fetch_older(&self, mailbox: &str, since: &SyncState, _: &OlderFrom, count: u32) -> Result<OlderBatch> {
+        self.log.lock().unwrap().push(format!("older {mailbox}"));
+        self.check_online()?;
+        if *self.older_rejects.lock().unwrap() {
+            return Err(Error::Protocol("NO older mail for you".into()));
+        }
+        let all = self.boxes.lock().unwrap().get(mailbox).cloned().unwrap_or_default();
+        let n = window_of(Some(since)).unwrap_or(all.len()).min(all.len());
+        let n2 = (n + count as usize).min(all.len());
+        Ok(OlderBatch {
+            delta: MailboxDelta {
+                added: all[all.len() - n2..all.len() - n].to_vec(),
+                new_state: SyncState(format!("w:{n2}")),
+                ..Default::default()
+            },
+            more: n2 < all.len(),
         })
     }
     async fn fetch_body(&self, _: &str, rid: &str) -> Result<MessageBody> {
@@ -118,6 +148,10 @@ impl MailBackend for Fake {
         self.log.lock().unwrap().push(format!("submit {from} {rcpts:?}"));
         Ok(())
     }
+}
+
+fn window_of(since: Option<&SyncState>) -> Option<usize> {
+    since?.0.strip_prefix("w:")?.parse().ok()
 }
 
 impl Fake {
@@ -548,4 +582,138 @@ async fn queued_ops_survive_a_restart() {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
+}
+
+/// An inbox of 12 messages of which the server's first sync returns the newest 5.
+async fn setup_history() -> (Engine, Arc<Fake>, async_channel::Receiver<Event>, AccountId) {
+    let fake = Arc::new(Fake::default());
+    let mail: Vec<Envelope> = (1..=12).map(|n| env(n, &format!("Mail {n}"), true)).collect();
+    fake.boxes.lock().unwrap().insert("INBOX".into(), mail);
+    *fake.window.lock().unwrap() = Some(5);
+    let (tx, rx) = async_channel::unbounded();
+    let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.older_batch = 4;
+    let cfg = AccountConfig::preset(Provider::Fastmail, "Tom", "tom@x.com");
+    let id = cfg.id;
+    engine.add(cfg, fake.clone());
+    engine.start_account(id);
+    engine.settle().await;
+    (engine, fake, rx, id)
+}
+
+fn cached(e: &Engine, id: AccountId) -> u32 {
+    e.store().oldest_cached(inbox(e, id)).unwrap().1
+}
+
+#[tokio::test]
+async fn load_older_extends_the_cached_window() {
+    let (mut engine, fake, _rx, id) = setup_history().await;
+    let inbox_id = inbox(&engine, id);
+    assert_eq!(cached(&engine, id), 5);
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert_eq!(cached(&engine, id), 9);
+    assert_eq!(engine.store().oldest_cached(inbox_id).unwrap().0.as_deref(), Some("4"));
+    assert_eq!(engine.store().sync_state(inbox_id).unwrap().unwrap().0, "w:9");
+
+    // A queued action on an older message isn't reverted by the next sync.
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::Move(vec![msg_id(&engine, id, "4")], MoveTarget::Trash));
+    engine.settle().await;
+    engine.handle(Command::SyncMailbox(inbox_id));
+    engine.settle().await;
+    let rows = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap();
+    assert!(!rows.iter().any(|r| r.envelope.remote_id == "4"));
+    assert_eq!(rows.len(), 8, "the other older rows survive the incremental sync");
+}
+
+#[tokio::test]
+async fn load_older_waits_for_a_running_sync_and_is_not_duplicated() {
+    let (mut engine, fake, _rx, id) = setup_history().await;
+    let inbox_id = inbox(&engine, id);
+    // Asked for while a regular sync is in flight: runs after it.
+    engine.handle(Command::SyncMailbox(inbox_id));
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert_eq!(count(&fake, "older INBOX"), 1);
+    assert_eq!(cached(&engine, id), 9);
+
+    // Asked for twice while loading: one download.
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert_eq!(count(&fake, "older INBOX"), 2);
+    assert_eq!(cached(&engine, id), 12);
+
+    // A sync asked for during a load isn't lost, and keeps the older rows.
+    fake.boxes.lock().unwrap().get_mut("INBOX").unwrap().push(env(13, "New", false));
+    engine.exhausted.clear();
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.handle(Command::SyncMailbox(inbox_id));
+    engine.settle().await;
+    assert_eq!(cached(&engine, id), 13);
+}
+
+#[tokio::test]
+async fn load_older_stops_at_the_start_and_handles_failures() {
+    let (mut engine, fake, rx, id) = setup_history().await;
+    let inbox_id = inbox(&engine, id);
+    engine.older_batch = 100;
+    while rx.try_recv().is_ok() {}
+
+    // Offline: no toast, and the slot is released for a later try.
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert!(errors(&rx).is_empty());
+    *fake.offline.lock().unwrap() = false;
+
+    // Refused: one toast, and no rollback re-download of the mailbox.
+    *fake.older_rejects.lock().unwrap() = true;
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert_eq!(errors(&rx).len(), 1);
+    assert_eq!(engine.store().sync_state(inbox_id).unwrap().unwrap().0, "w:5");
+    *fake.older_rejects.lock().unwrap() = false;
+
+    // Everything older in one batch, then no more requests.
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert_eq!(cached(&engine, id), 12);
+    engine.handle(Command::LoadOlder(vec![inbox_id]));
+    engine.settle().await;
+    assert_eq!(count(&fake, "older INBOX"), 3);
+}
+
+#[tokio::test]
+async fn demo_history_loads_until_exhausted() {
+    let (tx, _rx) = async_channel::unbounded();
+    let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    let cfg = crate::demo::demo_account();
+    let id = cfg.id;
+    engine.add(cfg, Arc::new(crate::demo::DemoBackend::new()));
+    engine.start_account(id);
+    engine.settle().await;
+    let inbox_id = inbox(&engine, id);
+    assert_eq!(cached(&engine, id), 50, "first sync is the newest window");
+
+    let mut rounds = 0;
+    while !engine.exhausted.contains(&inbox_id) {
+        engine.handle(Command::LoadOlder(vec![inbox_id]));
+        engine.settle().await;
+        rounds += 1;
+        assert!(rounds < 10);
+    }
+    assert_eq!(cached(&engine, id), 607, "7 recent + 600 generated");
+    assert_eq!(rounds, 3, "250 per batch");
+
+    // Archiving an old message: it shows up in Archive, not lost below its window.
+    let oldest = engine.store().oldest_cached(inbox_id).unwrap().0.unwrap();
+    let rows = engine.store().list(&ListScope::Mailbox(inbox_id), false, 1000).unwrap();
+    let old = rows.iter().find(|m| m.envelope.remote_id == oldest).unwrap().id;
+    engine.handle(Command::Move(vec![old], MoveTarget::Archive));
+    engine.settle().await;
+    let archive = engine.store().mailbox_by_role(id, MailboxRole::Archive).unwrap().unwrap().id;
+    let rows = engine.store().list(&ListScope::Mailbox(archive), false, 50).unwrap();
+    assert!(rows.iter().any(|m| m.envelope.remote_id == oldest));
 }

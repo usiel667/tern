@@ -170,6 +170,25 @@ impl Store {
             .find(|m| m.remote.role == role))
     }
 
+    /// The oldest cached message's remote id and how many are cached (where
+    /// "load older" continues from).
+    pub fn oldest_cached(&self, mailbox: MailboxId) -> Result<(Option<String>, u32)> {
+        let oldest = self
+            .conn
+            .query_row(
+                "SELECT remote_id FROM messages WHERE mailbox = ?1 ORDER BY date, id LIMIT 1",
+                [mailbox.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db)?;
+        let cached = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages WHERE mailbox = ?1", [mailbox.0], |r| r.get(0))
+            .map_err(db)?;
+        Ok((oldest, cached))
+    }
+
     pub fn sync_state(&self, mailbox: MailboxId) -> Result<Option<SyncState>> {
         let s: Option<String> = self
             .conn

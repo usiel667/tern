@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tern_core::account::{AccountConfig, Provider, Transport};
-use tern_core::backend::{MailBackend, MailboxDelta, PushEvent};
+use tern_core::backend::{MailBackend, MailboxDelta, OlderBatch, OlderFrom, PushEvent};
 use tern_core::model::*;
 use tern_core::{Error, Result};
 use tern_imap::ImapBackend;
@@ -31,6 +31,8 @@ pub use config::Paths;
 
 /// How many messages per mailbox to download on first sync.
 pub const INITIAL_SYNC_LIMIT: u32 = 1000;
+/// How many older messages to download per mailbox when scrolling back.
+pub const OLDER_BATCH: u32 = 250;
 /// Background resync of every mailbox (push only watches the inbox).
 pub const PERIODIC_SYNC: Duration = Duration::from_secs(5 * 60);
 /// IMAP IDLE must be re-issued before 29 minutes (RFC 2177).
@@ -127,6 +129,8 @@ pub enum Command {
     /// "Get Mail" (⇧⌘N).
     SyncAll,
     SyncMailbox(MailboxId),
+    /// Download the next batch of older mail for these mailboxes (scrolled to the end).
+    LoadOlder(Vec<MailboxId>),
     /// Download a body if it isn't cached; emits `BodyReady`.
     FetchBody(MessageId),
     SetFlags(Vec<MessageId>, FlagChange),
@@ -161,6 +165,7 @@ pub enum Event {
 enum Internal {
     Mailboxes(AccountId, Vec<RemoteMailbox>),
     Delta(AccountId, MailboxId, MailboxDelta),
+    Older { account: AccountId, mailbox: MailboxId, result: Result<OlderBatch> },
     Body(MessageId, MessageBody),
     Push(AccountId, PushEvent),
     Sent { outbox_id: i64, account: AccountId, responding_to: Option<(MessageId, FlagChange)> },
@@ -272,6 +277,15 @@ pub struct Engine {
     connect: Connect,
     /// Accounts with a queued op in flight; ops run one at a time per account.
     draining: std::collections::HashSet<AccountId>,
+    /// Mailboxes loading older mail (these also hold their `syncing` slot).
+    loading_older: std::collections::HashSet<MailboxId>,
+    /// "Load older" asked for while the mailbox was syncing; runs after it.
+    older_wanted: std::collections::HashSet<MailboxId>,
+    /// A sync asked for while the mailbox was loading older mail; runs after it.
+    sync_wanted: std::collections::HashSet<MailboxId>,
+    /// The server had nothing older (this session).
+    exhausted: std::collections::HashSet<MailboxId>,
+    older_batch: u32,
 }
 
 impl Engine {
@@ -305,6 +319,11 @@ impl Engine {
             auth_retry: Default::default(),
             connect: Arc::new(|cfg| Box::pin(async move { backend_for(&cfg).await })),
             draining: Default::default(),
+            loading_older: Default::default(),
+            older_wanted: Default::default(),
+            sync_wanted: Default::default(),
+            exhausted: Default::default(),
+            older_batch: OLDER_BATCH,
         }
     }
 
@@ -436,6 +455,10 @@ impl Engine {
 
     fn sync_mailbox(&mut self, mailbox: MailboxId) {
         if !self.syncing.insert(mailbox) {
+            // A sync already in flight covers this request; an older-mail load doesn't.
+            if self.loading_older.contains(&mailbox) {
+                self.sync_wanted.insert(mailbox);
+            }
             return;
         }
         let Ok(mb) = self.store.mailbox(mailbox) else {
@@ -460,6 +483,38 @@ impl Engine {
         });
     }
 
+    /// Download the next batch of older mail. Shares the mailbox's `syncing` slot
+    /// with regular syncs: both write the cursor, and a regular sync finishing
+    /// after this with the old window would delete the older rows via `present`.
+    fn load_older(&mut self, mailbox: MailboxId) {
+        if self.exhausted.contains(&mailbox) || self.loading_older.contains(&mailbox) {
+            return;
+        }
+        if self.syncing.contains(&mailbox) {
+            self.older_wanted.insert(mailbox);
+            return;
+        }
+        let Ok(mb) = self.store.mailbox(mailbox) else { return };
+        let Some(backend) = self.accounts.get(&mb.account).map(|a| a.backend.clone()) else { return };
+        // Never synced: there's no window to extend yet.
+        let Some(since) = self.store.sync_state(mailbox).ok().flatten() else { return };
+        if !mb.remote.selectable {
+            return;
+        }
+        let (oldest_remote_id, cached) = match self.store.oldest_cached(mailbox) {
+            Ok(o) => o,
+            Err(e) => return self.fail(Some(mb.account), e),
+        };
+        let from = OlderFrom { oldest_remote_id, cached };
+        self.syncing.insert(mailbox);
+        self.loading_older.insert(mailbox);
+        let (account, count) = (mb.account, self.older_batch);
+        self.spawn_task(account, async move {
+            let result = backend.fetch_older(&mb.remote.remote_id, &since, &from, count).await;
+            Internal::Older { account, mailbox, result }
+        });
+    }
+
     /// Force a full re-read of one mailbox (drops the cursor).
     fn store_resync(&mut self, mailbox: MailboxId) {
         let _ = self.store.apply_delta(mailbox, &MailboxDelta { full_resync: false, ..Default::default() });
@@ -470,6 +525,7 @@ impl Engine {
         match cmd {
             Command::SyncAll => self.sync_all(),
             Command::SyncMailbox(m) => self.sync_mailbox(m),
+            Command::LoadOlder(boxes) => boxes.into_iter().for_each(|m| self.load_older(m)),
             Command::FetchBody(id) => self.fetch_body(id),
             Command::SetFlags(ids, change) => self.set_flags(ids, change),
             Command::Move(ids, target) => self.move_messages(ids, target),
@@ -882,6 +938,13 @@ impl Engine {
                     self.discard_ops_for(account, mailbox);
                 }
                 self.overlay_pending(account, mailbox);
+                if initial {
+                    // Back to the newest window: older mail can be loaded again.
+                    self.exhausted.remove(&mailbox);
+                }
+                if self.older_wanted.remove(&mailbox) {
+                    self.load_older(mailbox);
+                }
                 self.emit(Event::MessagesChanged(Some(mailbox)));
                 self.emit(Event::MailboxesChanged);
                 if is_inbox && !initial && !new_unseen.is_empty() {
@@ -897,6 +960,37 @@ impl Engine {
                             id: m.id,
                         });
                     }
+                }
+            }
+            Internal::Older { account, mailbox, result } => {
+                self.syncing.remove(&mailbox);
+                self.loading_older.remove(&mailbox);
+                match result {
+                    Ok(batch) => {
+                        if !batch.more {
+                            self.exhausted.insert(mailbox);
+                        }
+                        if !batch.delta.added.is_empty() {
+                            if let Err(e) = self.store.apply_delta(mailbox, &batch.delta) {
+                                self.fail(Some(account), e);
+                            } else {
+                                self.overlay_pending(account, mailbox);
+                                self.emit(Event::MessagesChanged(Some(mailbox)));
+                                self.emit(Event::MailboxesChanged);
+                            }
+                        }
+                    }
+                    // Not a rollback case: nothing local changed, so no resync.
+                    Err(Error::Network(e)) => info!(%account, "loading older mail: {e}"),
+                    Err(e @ Error::Auth(_)) => {
+                        if self.schedule_reconnect(account) {
+                            self.fail(Some(account), e);
+                        }
+                    }
+                    Err(e) => self.fail(Some(account), e),
+                }
+                if self.sync_wanted.remove(&mailbox) {
+                    self.sync_mailbox(mailbox);
                 }
             }
             Internal::Body(id, body) => {

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use tern_auth::Credential;
 use tern_core::account::{Security, ServerConfig};
-use tern_core::backend::{MailBackend, PushEvent};
+use tern_core::backend::{MailBackend, OlderFrom, PushEvent};
 use tern_core::model::{FlagColor, Flags, MailboxRole};
 use tern_imap::ImapBackend;
 
@@ -82,6 +82,14 @@ async fn full_cycle() {
     let limited = b.sync_mailbox(&inbox, None, Some(2)).await.unwrap();
     assert_eq!(limited.added.len(), 2);
     assert_eq!(limited.added[0].subject, "Live 2");
+
+    // Scrolling back: the one message below that window, and nothing more.
+    let older = b.fetch_older(&inbox, &limited.new_state, &OlderFrom::default(), 10).await.unwrap();
+    assert_eq!(older.delta.added.len(), 1);
+    assert_eq!(older.delta.added[0].subject, "Live 1");
+    assert!(!older.more);
+    let none = b.fetch_older(&inbox, &older.delta.new_state, &OlderFrom::default(), 10).await.unwrap();
+    assert!(none.delta.added.is_empty() && !none.more);
 
     // Apple-style coloured flag round-trips through keywords.
     let blue = Flags { seen: true, flag: Some(FlagColor::Blue), ..Default::default() };

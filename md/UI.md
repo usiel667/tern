@@ -23,4 +23,8 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
--
+- **2026-10-16 — Message list paging and subtitle:** the list loads 500 rows at a time and
+  grows as you scroll; reaching the end of the cache downloads older mail (also grows the
+  page so the batch shows at once). The subtitle shows the real cached total and unread count
+  for a mailbox or unified view, not the rows paged in (it used to read "500 messages" with
+  550 cached). Search, the unread filter and Flagged/Unread still count visible rows.

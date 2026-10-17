@@ -200,6 +200,7 @@ impl Ui {
         *self.scope.borrow_mut() = scope.clone();
         *self.scope_title.borrow_mut() = title.to_string();
         self.list.selection.unselect_all();
+        self.list.reset_paging();
         self.reload_list();
         self.viewer.clear();
         if let ListScope::Mailbox(id) = scope {

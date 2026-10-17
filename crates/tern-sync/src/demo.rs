@@ -9,13 +9,16 @@ use async_trait::async_trait;
 use chrono::{Duration as CDuration, Utc};
 use tern_core::Result;
 use tern_core::account::{AccountConfig, Provider};
-use tern_core::backend::{MailBackend, MailboxDelta, PushEvent, SyncState};
+use tern_core::backend::{MailBackend, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
 use tern_core::model::*;
 
 use crate::{Engine, EngineHandle, Paths};
 
 pub struct DemoBackend {
     boxes: Mutex<HashMap<String, Vec<(Envelope, Vec<u8>)>>>,
+    /// Messages moved or sent after startup. A real server gives these new UIDs
+    /// above the cached window, so they're always inside it whatever their date.
+    arrived: Mutex<std::collections::HashSet<String>>,
 }
 
 fn addr(name: &str, email: &str) -> Address {
@@ -36,6 +39,19 @@ struct Spec {
 }
 
 const ME: (&str, &str) = ("Tom", "tom@example.com");
+
+/// Generated older inbox mail, so scrolling back through history can be tried.
+const HISTORY: usize = 600;
+/// The demo "server" only returns this many newest messages per mailbox on first
+/// sync (a real server's limit is 1,000), so loading older mail is visible.
+const DEMO_WINDOW: usize = 50;
+
+const HISTORY_SENDERS: &[(&str, &str, &str)] = &[
+    ("Rust Weekly", "news@rustweekly.example", "This Week in Rust #"),
+    ("GitHub", "notifications@github.example", "[tern] Pull request merged #"),
+    ("Jordan Alvarez", "jordan@ops.example", "Daily ops report #"),
+    ("Arch Linux", "news@archlinux.example", "Package update digest #"),
+];
 
 const SPECS: &[Spec] = &[
     Spec { mailbox: "INBOX", from: ("Maya Chen", "maya@studio.example"), subject: "Hyprland config for the new monitors", hours_ago: 1, seen: false, flag: None, id: "m1", reply_to: None,
@@ -102,7 +118,43 @@ impl DemoBackend {
             };
             boxes.get_mut(s.mailbox).unwrap().push((env, raw.into_bytes()));
         }
-        Self { boxes: Mutex::new(boxes) }
+        let inbox = boxes.get_mut("INBOX").unwrap();
+        for i in 0..HISTORY {
+            let (name, email, subject) = HISTORY_SENDERS[i % HISTORY_SENDERS.len()];
+            let n = HISTORY - i;
+            let subject = format!("{subject}{n}");
+            let date = Utc::now() - CDuration::days(6) - CDuration::hours(i as i64 * 8);
+            let body = format!("Older demo message {n} of {HISTORY}, from {name}.");
+            let raw = format!(
+                "From: {name} <{email}>\r\nTo: Tom <tom@example.com>\r\nSubject: {subject}\r\nDate: {}\r\n\
+                 Message-ID: <h{n}@demo>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n",
+                date.to_rfc2822()
+            );
+            let env = Envelope {
+                remote_id: (1000 + i).to_string(),
+                message_id: Some(format!("<h{n}@demo>")),
+                in_reply_to: None,
+                references: vec![],
+                subject,
+                from: vec![addr(name, email)],
+                to: vec![addr(ME.0, ME.1)],
+                cc: vec![],
+                date,
+                flags: Flags { seen: true, ..Default::default() },
+                size: raw.len() as u32,
+                has_attachments: false,
+                preview: Some(body),
+            };
+            inbox.push((env, raw.into_bytes()));
+        }
+        Self { boxes: Mutex::new(boxes), arrived: Default::default() }
+    }
+}
+
+impl DemoBackend {
+    fn envelopes(&self, mailbox: &str) -> Vec<Envelope> {
+        let boxes = self.boxes.lock().unwrap();
+        boxes.get(mailbox).map(|v| v.iter().map(|(e, _)| e.clone()).collect()).unwrap_or_default()
     }
 }
 
@@ -110,6 +162,18 @@ impl Default for DemoBackend {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The demo cursor: `demo:<unix seconds>`, the date of the oldest cached message.
+/// Everything at or after it is "cached", like an IMAP UID window.
+fn cutoff_of(since: Option<&SyncState>) -> Option<i64> {
+    since?.0.strip_prefix("demo:")?.parse().ok()
+}
+
+/// Messages newest first.
+fn by_date_desc(mut all: Vec<Envelope>) -> Vec<Envelope> {
+    all.sort_by_key(|e| std::cmp::Reverse(e.date));
+    all
 }
 
 fn strip_tags(html: &str) -> String {
@@ -170,14 +234,39 @@ impl MailBackend for DemoBackend {
     }
 
     async fn sync_mailbox(&self, mailbox: &str, since: Option<&SyncState>, _: Option<u32>) -> Result<MailboxDelta> {
-        let boxes = self.boxes.lock().unwrap();
-        let all: Vec<Envelope> = boxes.get(mailbox).map(|v| v.iter().map(|(e, _)| e.clone()).collect()).unwrap_or_default();
+        let all = by_date_desc(self.envelopes(mailbox));
+        let cutoff = cutoff_of(since).unwrap_or_else(|| {
+            all.get(DEMO_WINDOW.min(all.len()).saturating_sub(1)).map_or(0, |e| e.date.timestamp())
+        });
+        let arrived = self.arrived.lock().unwrap().clone();
+        let visible: Vec<Envelope> = all
+            .into_iter()
+            .filter(|e| e.date.timestamp() >= cutoff || arrived.contains(&e.remote_id))
+            .collect();
         Ok(MailboxDelta {
             full_resync: since.is_none(),
-            present: Some(all.iter().map(|e| e.remote_id.clone()).collect()),
-            added: all,
-            new_state: SyncState("demo".into()),
+            present: Some(visible.iter().map(|e| e.remote_id.clone()).collect()),
+            added: visible,
+            new_state: SyncState(format!("demo:{cutoff}")),
             ..Default::default()
+        })
+    }
+
+    async fn fetch_older(&self, mailbox: &str, since: &SyncState, _: &OlderFrom, count: u32) -> Result<OlderBatch> {
+        let Some(cutoff) = cutoff_of(Some(since)) else {
+            return Ok(OlderBatch { delta: MailboxDelta { new_state: since.clone(), ..Default::default() }, more: true });
+        };
+        let arrived = self.arrived.lock().unwrap().clone();
+        let older: Vec<Envelope> = by_date_desc(self.envelopes(mailbox))
+            .into_iter()
+            .filter(|e| e.date.timestamp() < cutoff && !arrived.contains(&e.remote_id))
+            .collect();
+        let more = older.len() > count as usize;
+        let added: Vec<Envelope> = older.into_iter().take(count as usize).collect();
+        let new_cutoff = added.last().map_or(cutoff, |e| e.date.timestamp());
+        Ok(OlderBatch {
+            delta: MailboxDelta { added, new_state: SyncState(format!("demo:{new_cutoff}")), ..Default::default() },
+            more,
         })
     }
 
@@ -209,6 +298,7 @@ impl MailBackend for DemoBackend {
         let (moved, keep): (Vec<_>, Vec<_>) = src.drain(..).partition(|(e, _)| rids.contains(&e.remote_id));
         *src = keep;
         boxes.entry(to.into()).or_default().extend(moved);
+        self.arrived.lock().unwrap().extend(rids.iter().cloned());
         Ok(rids.to_vec())
     }
 
@@ -243,6 +333,7 @@ impl MailBackend for DemoBackend {
             raw.len() as u32,
             None,
         );
+        self.arrived.lock().unwrap().insert(env.remote_id.clone());
         self.boxes.lock().unwrap().entry("Sent".into()).or_default().push((env, raw.to_vec()));
         Ok(())
     }
