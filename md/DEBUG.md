@@ -9,6 +9,8 @@ Handy commands:
 RUST_LOG=tern_sync=debug,tern_imap=debug cargo run   # verbose sync logging
 cargo run -- --demo                                  # fake account, no network/keyring
 grim -g "X,Y WxH" shot.png                           # screenshot a window (geometry from hyprctl clients -j)
+dev/test-imap-server.sh start                        # local Dovecot for live tests (target/dovecot)
+eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
 ```
 
 ---
