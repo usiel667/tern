@@ -93,6 +93,8 @@ enum Internal {
     Body(MessageId, MessageBody),
     Push(AccountId, PushEvent),
     Sent { outbox_id: i64, account: AccountId, responding_to: Option<(MessageId, FlagChange)> },
+    /// A queued send failed; it stays in the outbox for the next flush.
+    SendFailed { outbox_id: i64, account: AccountId, error: Error },
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
     /// A (re)built backend for an account, ready to start syncing.
     AccountReady(AccountConfig, Arc<dyn MailBackend>),
@@ -174,6 +176,8 @@ pub struct Engine {
     /// Mailboxes with a sync task in flight, so "Get Mail" spam doesn't stack.
     syncing: std::collections::HashSet<MailboxId>,
     in_flight: HashMap<AccountId, usize>,
+    /// Outbox rows with a send in flight, so a flush doesn't send them twice.
+    sending: std::collections::HashSet<i64>,
 }
 
 impl Engine {
@@ -203,6 +207,7 @@ impl Engine {
             rx,
             syncing: Default::default(),
             in_flight: Default::default(),
+            sending: Default::default(),
         }
     }
 
@@ -516,8 +521,11 @@ impl Engine {
             Ok(o) => o,
             Err(e) => return self.fail(Some(account), e),
         };
-        // Queue first so a crash or offline send isn't lost.
-        let outbox_id = match self.store.outbox_push(account, &out.raw) {
+        // Queue first so a crash or offline send isn't lost. The envelope is
+        // stored too: it's the only place Bcc recipients exist.
+        let from = out.envelope.from().map(|a| a.to_string()).unwrap_or_default();
+        let rcpts: Vec<String> = out.envelope.to().iter().map(|a| a.to_string()).collect();
+        let outbox_id = match self.store.outbox_push(account, &out.raw, &from, &rcpts) {
             Ok(id) => id,
             Err(e) => return self.fail(Some(account), e),
         };
@@ -532,6 +540,9 @@ impl Engine {
         responding_to: Option<(MessageId, FlagChange)>,
     ) {
         let Some(acct) = self.accounts.get(&account) else { return };
+        if !self.sending.insert(outbox_id) {
+            return;
+        }
         let backend = acct.backend.clone();
         let cfg = acct.cfg.clone();
         let sent_box = self
@@ -566,7 +577,7 @@ impl Engine {
             .await;
             match result {
                 Ok(()) => Internal::Sent { outbox_id, account, responding_to },
-                Err(error) => Internal::Failed { account: Some(account), mailbox: None, error },
+                Err(error) => Internal::SendFailed { outbox_id, account, error },
             }
         });
     }
@@ -574,9 +585,12 @@ impl Engine {
     /// Retry anything left in the outbox (previous run crashed or was offline).
     fn flush_outbox(&mut self) {
         let Ok(items) = self.store.outbox() else { return };
-        for (id, account, raw) in items {
-            // Rebuild the envelope from the stored message.
-            let Some(out) = outgoing_from_raw(raw) else { continue };
+        for item in items {
+            if self.sending.contains(&item.id) {
+                continue;
+            }
+            let (id, account) = (item.id, item.account);
+            let Some(out) = outgoing_from_item(item) else { continue };
             self.dispatch_outgoing(id, account, out, None);
         }
     }
@@ -711,6 +725,7 @@ impl Engine {
             }
             Internal::Nothing => {}
             Internal::Sent { outbox_id, account, responding_to } => {
+                self.sending.remove(&outbox_id);
                 let _ = self.store.outbox_done(outbox_id);
                 self.emit(Event::Sent);
                 if let Some((id, change)) = responding_to {
@@ -719,6 +734,13 @@ impl Engine {
                 if let Ok(Some(sent)) = self.store.mailbox_by_role(account, MailboxRole::Sent) {
                     self.sync_mailbox(sent.id);
                 }
+            }
+            Internal::SendFailed { outbox_id, account, error } => {
+                self.sending.remove(&outbox_id);
+                if let Err(e) = self.store.outbox_failed(outbox_id, &error.to_string()) {
+                    self.fail(Some(account), e);
+                }
+                self.internal(Internal::Failed { account: Some(account), mailbox: None, error });
             }
             Internal::Failed { account, mailbox, error } => {
                 if let Some(m) = mailbox {
@@ -742,13 +764,20 @@ impl Engine {
     }
 }
 
-/// Parse queued raw bytes back into an `Outgoing` (envelope from headers).
-fn outgoing_from_raw(raw: Vec<u8>) -> Option<tern_smtp::Outgoing> {
-    let env = tern_core::mime::envelope_from_parts(String::new(), &raw, None, Flags::default(), 0, None);
-    let from = env.from.first()?.email.parse().ok()?;
-    // Bcc isn't in the headers, so a resumed send loses Bcc recipients.
-    // TODO: store the SMTP envelope alongside the outbox row.
-    let to: Vec<_> = env.to.iter().chain(&env.cc).filter_map(|a| a.email.parse().ok()).collect();
+/// Turn a queued row back into an `Outgoing`, using its stored SMTP envelope.
+fn outgoing_from_item(item: tern_store::OutboxItem) -> Option<tern_smtp::Outgoing> {
+    let raw = item.raw;
+    let (from, to) = match item.envelope {
+        Some((from, to)) => (from.parse().ok()?, to.iter().filter_map(|a| a.parse().ok()).collect()),
+        None => {
+            // Queued before the envelope was stored: rebuild it from the headers
+            // (Bcc isn't in them, so those recipients are lost).
+            let env = tern_core::mime::envelope_from_parts(String::new(), &raw, None, Flags::default(), 0, None);
+            let from = env.from.first()?.email.parse().ok()?;
+            let to: Vec<_> = env.to.iter().chain(&env.cc).filter_map(|a| a.email.parse().ok()).collect();
+            (from, to)
+        }
+    };
     let envelope = tern_smtp::lettre_envelope(Some(from), to).ok()?;
     Some(tern_smtp::Outgoing { raw, envelope })
 }

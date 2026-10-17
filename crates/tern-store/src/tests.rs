@@ -184,9 +184,35 @@ fn full_text_search_with_tokens() {
 #[test]
 fn outbox_round_trip() {
     let (mut s, acct, _, _) = setup();
-    let id = s.outbox_push(acct, b"Subject: hi\r\n\r\nhi").unwrap();
-    assert_eq!(s.outbox().unwrap().len(), 1);
+    let to = vec!["ann@x.com".to_string(), "secret-bcc@x.com".to_string()];
+    let id = s.outbox_push(acct, b"Subject: hi\r\n\r\nhi", "tom@x.com", &to).unwrap();
+    let items = s.outbox().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].envelope, Some(("tom@x.com".to_string(), to)));
     s.outbox_failed(id, "offline").unwrap();
+    let item = &s.outbox().unwrap()[0];
+    assert_eq!((item.attempts, item.last_error.as_deref()), (1, Some("offline")));
     s.outbox_done(id).unwrap();
     assert!(s.outbox().unwrap().is_empty());
+}
+
+#[test]
+fn migrates_v1_outbox() {
+    // A v1 database with a queued send, as shipped in milestone 1.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE outbox (id INTEGER PRIMARY KEY, account TEXT NOT NULL, raw BLOB NOT NULL,
+             created INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+         INSERT INTO outbox (account, raw, created) VALUES ('00000000-0000-0000-0000-000000000000', x'41', 1);
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    let mut s = Store::init(conn).unwrap();
+    let old = &s.outbox().unwrap()[0];
+    assert_eq!((old.raw.as_slice(), &old.envelope), (b"A".as_slice(), &None));
+    // New rows can use the added column.
+    s.outbox_push(old.account, b"B", "tom@x.com", &["ann@x.com".into()]).unwrap();
+    assert!(s.outbox().unwrap()[1].envelope.is_some());
+    let v: i64 = s.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, SCHEMA_VERSION);
 }

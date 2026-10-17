@@ -11,6 +11,8 @@ use tern_store::ListScope;
 struct Fake {
     boxes: Mutex<HashMap<String, Vec<Envelope>>>,
     log: Mutex<Vec<String>>,
+    /// Make `submit` fail as if offline.
+    offline: Mutex<bool>,
 }
 
 fn env(uid: u32, subject: &str, seen: bool) -> Envelope {
@@ -94,6 +96,9 @@ impl MailBackend for Fake {
     }
     async fn submit(&self, raw: &[u8], from: &str, rcpts: &[String]) -> Result<()> {
         assert!(!raw.is_empty());
+        if *self.offline.lock().unwrap() {
+            return Err(Error::Network("offline".into()));
+        }
         self.log.lock().unwrap().push(format!("submit {from} {rcpts:?}"));
         Ok(())
     }
@@ -207,4 +212,47 @@ async fn body_fetch_is_cached() {
     engine.handle(Command::FetchBody(msg));
     assert!(matches!(rx.try_recv(), Ok(Event::BodyReady(_))), "served from cache synchronously");
     drop(fake);
+}
+
+fn draft_with_bcc() -> Draft {
+    Draft {
+        to: vec![Address::new(None, "ann@x.com")],
+        bcc: vec![Address::new(None, "secret@x.com")],
+        subject: "Hi".into(),
+        text: "hello".into(),
+        ..Default::default()
+    }
+}
+
+fn submits(fake: &Fake) -> Vec<String> {
+    fake.log.lock().unwrap().iter().filter(|l| l.starts_with("submit")).cloned().collect()
+}
+
+#[tokio::test]
+async fn offline_send_keeps_bcc_when_retried() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.settle().await;
+    let queued = engine.store().outbox().unwrap();
+    assert_eq!(queued.len(), 1, "failed send stays queued");
+    assert_eq!(queued[0].attempts, 1);
+
+    *fake.offline.lock().unwrap() = false;
+    engine.flush_outbox();
+    engine.settle().await;
+    let sent = submits(&fake);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("secret@x.com"), "Bcc survives the retry: {sent:?}");
+    assert!(engine.store().outbox().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn flush_during_send_does_not_send_twice() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    // The periodic flush fires while the send is still in flight.
+    engine.flush_outbox();
+    engine.settle().await;
+    assert_eq!(submits(&fake).len(), 1);
 }

@@ -13,6 +13,23 @@ grim -g "X,Y WxH" shot.png                           # screenshot a window (geom
 
 ---
 
+## 2026-10-16 — Outbox could send the same email twice, and lost Bcc on retry
+
+**Seen (code review, milestone 2):** `flush_outbox` (startup + every 5 min) re-dispatched
+every outbox row, including ones whose send was still in flight, so a slow send could go
+out twice. Retried sends rebuilt recipients from the headers, which never contain Bcc.
+Failed sends weren't recorded (`outbox_failed` was never called).
+
+**Fix:** the engine tracks in-flight outbox ids (`Engine::sending`) and skips them; the
+SMTP envelope is stored with each row (`outbox.envelope`, schema v2 + migration); a new
+`Internal::SendFailed` records attempts and last error. Tests:
+`flush_during_send_does_not_send_twice` (fails with 2 sends without the guard),
+`offline_send_keeps_bcc_when_retried`, `migrates_v1_outbox`.
+
+**Status:** fixed.
+
+---
+
 ## 2026-10-15 — Window see-through but not blurred on Hyprland
 
 **Seen:** Tern's window showed a sharp, unblurred wallpaper behind it, making text hard

@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Store {
     conn: Connection,
@@ -56,7 +56,12 @@ impl Store {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(db)?;
         if version < SCHEMA_VERSION {
+            // Fresh databases get the current shape from SCHEMA; older ones also
+            // need the column changes that `CREATE TABLE IF NOT EXISTS` skips.
             conn.execute_batch(SCHEMA).map_err(db)?;
+            if version >= 1 {
+                migrate(&conn, version)?;
+            }
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(db)?;
         }
@@ -505,25 +510,44 @@ impl Store {
 
     // ------------------------------------------------------------------- outbox
 
-    pub fn outbox_push(&mut self, account: AccountId, raw: &[u8]) -> Result<i64> {
+    /// Queue a message with its SMTP envelope (`to` includes Bcc, which isn't in `raw`).
+    pub fn outbox_push(&mut self, account: AccountId, raw: &[u8], from: &str, to: &[String]) -> Result<i64> {
+        let envelope = json!({ "from": from, "to": to }).to_string();
         self.conn
             .execute(
-                "INSERT INTO outbox (account, raw, created) VALUES (?1, ?2, ?3)",
-                params![account.to_string(), raw, Utc::now().timestamp()],
+                "INSERT INTO outbox (account, raw, envelope, created) VALUES (?1, ?2, ?3, ?4)",
+                params![account.to_string(), raw, envelope, Utc::now().timestamp()],
             )
             .map_err(db)?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn outbox(&self) -> Result<Vec<(i64, AccountId, Vec<u8>)>> {
+    pub fn outbox(&self) -> Result<Vec<OutboxItem>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, account, raw FROM outbox ORDER BY created")
+            .prepare("SELECT id, account, raw, envelope, attempts, last_error FROM outbox ORDER BY created, id")
             .map_err(db)?;
-        stmt.query_map([], |r| Ok((r.get(0)?, parse_account(&r.get::<_, String>(1)?), r.get(2)?)))
-            .map_err(db)?
-            .collect::<rusqlite::Result<_>>()
-            .map_err(db)
+        stmt.query_map([], |r| {
+            let envelope = r
+                .get::<_, Option<String>>(3)?
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|v| {
+                    let from = v["from"].as_str()?.to_owned();
+                    let to = v["to"].as_array()?.iter().filter_map(|a| a.as_str().map(str::to_owned)).collect();
+                    Some((from, to))
+                });
+            Ok(OutboxItem {
+                id: r.get(0)?,
+                account: parse_account(&r.get::<_, String>(1)?),
+                raw: r.get(2)?,
+                envelope,
+                attempts: r.get(4)?,
+                last_error: r.get(5)?,
+            })
+        })
+        .map_err(db)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db)
     }
 
     pub fn outbox_done(&mut self, id: i64) -> Result<()> {
@@ -540,6 +564,27 @@ impl Store {
             .map_err(db)?;
         Ok(())
     }
+}
+
+/// Upgrade an existing database from `from` to `SCHEMA_VERSION`, one step at a time.
+fn migrate(conn: &Connection, from: i64) -> Result<()> {
+    if from < 2 {
+        conn.execute_batch("ALTER TABLE outbox ADD COLUMN envelope TEXT;").map_err(db)?;
+    }
+    Ok(())
+}
+
+/// A queued send.
+#[derive(Debug, Clone)]
+pub struct OutboxItem {
+    pub id: i64,
+    pub account: AccountId,
+    pub raw: Vec<u8>,
+    /// SMTP envelope `(from, recipients)`, Bcc included. `None` for rows queued
+    /// before schema v2; those fall back to the headers and lose Bcc.
+    pub envelope: Option<(String, Vec<String>)>,
+    pub attempts: u32,
+    pub last_error: Option<String>,
 }
 
 /// What the message list is showing.

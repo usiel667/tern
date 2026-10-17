@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS outbox (
     id         INTEGER PRIMARY KEY,
     account    TEXT    NOT NULL,
     raw        BLOB    NOT NULL,
+    envelope   TEXT,              -- JSON {"from", "to"}: SMTP envelope incl. Bcc (v2+)
     created    INTEGER NOT NULL,
     attempts   INTEGER NOT NULL DEFAULT 0,
     last_error TEXT

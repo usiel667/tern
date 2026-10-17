@@ -133,9 +133,14 @@ Key decisions:
 ## Milestones
 
 1. **Read + compose + send** — done (this commit).
-2. **Robustness:** CONDSTORE/QRESYNC, replay `pending_ops`, load older mail on scroll,
-   store the SMTP envelope with outbox rows (Bcc on resumed sends), rate-limit auth retries,
-   JMAP EventSource push.
+2. **Robustness** (in progress):
+   - ✅ Outbox: store the SMTP envelope with each row (Bcc survives a resumed send),
+     never dispatch a row that's already sending, record failed attempts (schema v2).
+   - ⬜ Rate-limit auth retries.
+   - ⬜ Replay `pending_ops` (offline flag/move).
+   - ⬜ Load older mail on scroll.
+   - ⬜ CONDSTORE/QRESYNC.
+   - ⬜ JMAP EventSource push.
 3. **Compose polish:** drafts/autosave, address autocomplete, drag-and-drop attachments,
    Undo Send, signature editor, mailto: CLI handler.
 4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
@@ -147,5 +152,7 @@ Key decisions:
 
 - First launch syncs every mailbox's newest 1000 messages; very large accounts will take a while.
 - Gmail shows labels as folders (as Apple Mail does over IMAP), so a message can appear in several.
-- A resumed send from the outbox (after a crash) loses Bcc recipients.
+- Failed sends retry every 5 minutes with no limit, and there's no Outbox view to see or
+  cancel them (attempts and last error are recorded in the `outbox` table).
+- Sends queued before schema v2 (milestone 1) still lose Bcc if resumed.
 - The UI layer has no automated tests yet; `--demo` plus Xvfb screenshots is the current check.
