@@ -3,7 +3,7 @@
 An Apple Mail–style email client for Linux, written in Rust with GTK4 and libadwaita.
 Built for tiling Wayland desktops (Hyprland), works anywhere GTK does.
 
-![Tern showing All Inboxes with a newsletter open and remote content blocked](docs/screenshot.png)
+![Tern showing All Inboxes with a newsletter open and remote content blocked](docs/assets/screenshot.png)
 
 ## Try it without an account
 
@@ -16,7 +16,7 @@ send all work, and nothing touches the network or your keyring.
 
 ## Status
 
-Milestone 1 (read + compose + send) is in place; see [PLAN.md](PLAN.md) for the
+Milestone 1 (read + compose + send) is in place; see [md/PLAN.md](md/PLAN.md) for the
 Apple Mail feature map and what's next.
 
 | Account type | Protocol | Sign-in | Sending |

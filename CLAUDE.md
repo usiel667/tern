@@ -2,8 +2,12 @@
 
 Apple Mail–style mail client for Linux. Rust 2024, GTK4 0.11 + libadwaita 0.9 (features
 `v4_14` / `v1_5`), WebKitGTK 6. The owner develops on Arch + Hyprland with LazyVim and tmux.
-`PLAN.md` has the feature map and roadmap; check it before starting a feature and update
+`md/PLAN.md` has the feature map and roadmap; check it before starting a feature and update
 its status table when you finish one.
+
+Project notes live in `md/` (only `README.md` and this file stay at the root). Log bugs
+and investigations in `md/DEBUG.md` (newest first) and look/feel requests and decisions
+in `md/UI.md`; add to them as you go.
 
 ## Layout
 

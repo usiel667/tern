@@ -2,7 +2,7 @@
 //!
 //! Two connections per account, as most clients do: one for commands, one that
 //! sits in IDLE on the inbox for push. Sync is UID-based and works on any
-//! server; CONDSTORE/QRESYNC are an optimisation to add later (see PLAN.md).
+//! server; CONDSTORE/QRESYNC are an optimisation to add later (see md/PLAN.md).
 
 mod connect;
 mod state;
