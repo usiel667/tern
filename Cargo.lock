@@ -38,12 +38,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "apple-native-keyring-store"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1530,9 +1524,9 @@ dependencies = [
 
 [[package]]
 name = "inout"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8c0d789294fb457b791f7797a04478704788f30b407e5d0b01deaa846572d9f"
+checksum = "3ce983bb6fb399067d101fbfc9e74174e07e9f29a2bc679efefeb8c645819c3f"
 dependencies = [
  "block-padding",
  "hybrid-array",
@@ -2929,7 +2923,6 @@ dependencies = [
  "tern-store",
  "tern-sync",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "webkit6",
 ]
@@ -2945,7 +2938,6 @@ dependencies = [
  "serde_json",
  "tern-core",
  "tokio",
- "tracing",
  "url",
 ]
 
@@ -2988,7 +2980,6 @@ dependencies = [
  "serde_json",
  "tern-core",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2999,7 +2990,6 @@ dependencies = [
  "mail-parser",
  "tern-auth",
  "tern-core",
- "tracing",
 ]
 
 [[package]]
@@ -3010,21 +3000,16 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tern-core",
- "tracing",
- "uuid",
 ]
 
 [[package]]
 name = "tern-sync"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-channel 2.5.0",
  "async-trait",
  "chrono",
  "directories",
- "futures",
- "serde",
  "tern-auth",
  "tern-core",
  "tern-imap",

@@ -14,7 +14,6 @@ serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 url.workspace = true
-tracing.workspace = true
 
 [lints]
 workspace = true

@@ -10,8 +10,6 @@ tern-core.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-uuid.workspace = true
-tracing.workspace = true
 
 [lints]
 workspace = true

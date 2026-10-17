@@ -9,7 +9,6 @@ license.workspace = true
 tern-core.workspace = true
 tern-auth.workspace = true
 lettre.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 mail-parser.workspace = true
