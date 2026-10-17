@@ -12,6 +12,7 @@ pub mod config;
 pub mod demo;
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,20 @@ pub const INITIAL_SYNC_LIMIT: u32 = 1000;
 pub const PERIODIC_SYNC: Duration = Duration::from_secs(5 * 60);
 /// IMAP IDLE must be re-issued before 29 minutes (RFC 2177).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
+/// Backoff between reconnects after repeated sign-in failures.
+pub const AUTH_RETRY_MIN: Duration = Duration::from_secs(30);
+pub const AUTH_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// Wait before reconnect attempt `n` (1-based) in a run of sign-in failures.
+/// The first is immediate (usually an expired token that a refresh fixes); after
+/// that it doubles from `AUTH_RETRY_MIN` up to `AUTH_RETRY_MAX`, so a wrong
+/// password doesn't hammer the server or flood the UI with errors.
+pub fn auth_retry_delay(n: u32) -> Duration {
+    match n {
+        0 | 1 => Duration::ZERO,
+        n => AUTH_RETRY_MIN.saturating_mul(1 << (n - 2).min(16)).min(AUTH_RETRY_MAX),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoveTarget {
@@ -96,8 +111,11 @@ enum Internal {
     /// A queued send failed; it stays in the outbox for the next flush.
     SendFailed { outbox_id: i64, account: AccountId, error: Error },
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
-    /// A (re)built backend for an account, ready to start syncing.
-    AccountReady(AccountConfig, Arc<dyn MailBackend>),
+    /// A (re)built backend for an account, ready to start syncing. `reconnect`
+    /// is set for rebuilds of an existing account (dropped if it was removed meanwhile).
+    AccountReady { cfg: AccountConfig, backend: Arc<dyn MailBackend>, reconnect: bool },
+    /// Building the backend failed (keyring, OAuth refresh); try again later.
+    ReconnectFailed(AccountConfig, Error),
     /// A task finished with nothing to report.
     Nothing,
     Done(AccountId),
@@ -106,6 +124,18 @@ enum Internal {
 struct Account {
     cfg: AccountConfig,
     backend: Arc<dyn MailBackend>,
+}
+
+type BackendFuture = Pin<Box<dyn Future<Output = Result<Arc<dyn MailBackend>>> + Send>>;
+/// Builds a backend for an account; `backend_for` normally, a fake in tests.
+type Connect = Arc<dyn Fn(AccountConfig) -> BackendFuture + Send + Sync>;
+
+/// Sign-in failure streak for one account.
+#[derive(Debug, Default)]
+struct AuthRetry {
+    failures: u32,
+    /// A reconnect is scheduled or running; further failures don't add another.
+    pending: bool,
 }
 
 /// Handle the UI keeps.
@@ -178,6 +208,8 @@ pub struct Engine {
     in_flight: HashMap<AccountId, usize>,
     /// Outbox rows with a send in flight, so a flush doesn't send them twice.
     sending: std::collections::HashSet<i64>,
+    auth_retry: HashMap<AccountId, AuthRetry>,
+    connect: Connect,
 }
 
 impl Engine {
@@ -208,6 +240,8 @@ impl Engine {
             syncing: Default::default(),
             in_flight: Default::default(),
             sending: Default::default(),
+            auth_retry: Default::default(),
+            connect: Arc::new(|cfg| Box::pin(async move { backend_for(&cfg).await })),
         }
     }
 
@@ -604,29 +638,50 @@ impl Engine {
                 return self.fail(Some(cfg.id), e);
             }
         }
-        self.rebuild_backend(cfg);
+        self.auth_retry.remove(&cfg.id);
+        self.rebuild_backend(cfg, Duration::ZERO, false);
         self.emit(Event::AccountsChanged);
     }
 
-    /// Build a backend off-loop (keyring access, maybe an OAuth refresh) and hand
-    /// it back as `AccountReady`.
-    fn rebuild_backend(&self, cfg: AccountConfig) {
+    /// Build a backend off-loop (keyring access, maybe an OAuth refresh) after
+    /// `delay`, and hand it back as `AccountReady`.
+    fn rebuild_backend(&self, cfg: AccountConfig, delay: Duration, reconnect: bool) {
         let tx = self.tx.clone();
-        let events = self.events.clone();
+        let connect = self.connect.clone();
         tokio::spawn(async move {
-            match backend_for(&cfg).await {
-                Ok(b) => {
-                    let _ = tx.send(Internal::AccountReady(cfg, b));
-                }
-                Err(e) => {
-                    let _ = events.send(Event::Error { account: Some(cfg.id), message: e.to_string() }).await;
-                }
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
             }
+            let _ = tx.send(match connect(cfg.clone()).await {
+                Ok(backend) => Internal::AccountReady { cfg, backend, reconnect },
+                Err(e) if reconnect => Internal::ReconnectFailed(cfg, e),
+                Err(e) => Internal::Failed { account: Some(cfg.id), mailbox: None, error: e },
+            });
         });
+    }
+
+    /// Schedule a reconnect after a sign-in failure, backing off on repeats.
+    /// Failures while one is already pending (other tasks failing the same way)
+    /// are absorbed. Returns whether this failure started a new attempt.
+    fn schedule_reconnect(&mut self, account: AccountId) -> bool {
+        let Some(cfg) = self.accounts.get(&account).map(|a| a.cfg.clone()) else { return false };
+        let retry = self.auth_retry.entry(account).or_default();
+        if retry.pending {
+            return false;
+        }
+        retry.pending = true;
+        retry.failures += 1;
+        let delay = auth_retry_delay(retry.failures);
+        if !delay.is_zero() {
+            info!(%account, "sign-in failed {} times; retrying in {delay:?}", retry.failures);
+        }
+        self.rebuild_backend(cfg, delay, true);
+        true
     }
 
     fn remove_account(&mut self, id: AccountId) {
         self.accounts.remove(&id);
+        self.auth_retry.remove(&id);
         if let Some(paths) = &self.paths {
             let mut file = paths.load_accounts().unwrap_or_default();
             file.accounts.retain(|a| a.id != id);
@@ -652,6 +707,8 @@ impl Engine {
                 }
             }
             Internal::Mailboxes(account, list) => {
+                // Talking to the server again: the sign-in failure streak is over.
+                self.auth_retry.remove(&account);
                 if let Err(e) = self.store.sync_mailboxes(account, &list) {
                     return self.fail(Some(account), e);
                 }
@@ -713,14 +770,31 @@ impl Engine {
                 }
             }
             Internal::Push(account, PushEvent::Disconnected) => self.refresh_mailboxes(account),
-            Internal::AccountReady(cfg, backend) => {
+            Internal::AccountReady { cfg, backend, reconnect } => {
                 let id = cfg.id;
                 let fresh = !self.accounts.contains_key(&id);
+                if reconnect {
+                    if fresh {
+                        return; // removed while reconnecting
+                    }
+                    if let Some(r) = self.auth_retry.get_mut(&id) {
+                        r.pending = false;
+                    }
+                }
                 self.add(cfg, backend);
                 if fresh {
                     self.start_account(id);
                 } else {
                     self.refresh_mailboxes(id);
+                }
+            }
+            Internal::ReconnectFailed(cfg, error) => {
+                let account = cfg.id;
+                if let Some(r) = self.auth_retry.get_mut(&account) {
+                    r.pending = false;
+                }
+                if self.schedule_reconnect(account) {
+                    self.fail(Some(account), error);
                 }
             }
             Internal::Nothing => {}
@@ -753,9 +827,10 @@ impl Engine {
                 }
                 if let (Some(a), Error::Auth(_)) = (account, &error) {
                     // Token may have expired: rebuild the backend with fresh credentials.
-                    // TODO: rate-limit so a wrong password doesn't loop.
-                    if let Some(acct) = self.accounts.get(&a) {
-                        self.rebuild_backend(acct.cfg.clone());
+                    // Only the failure that starts a reconnect is shown, so a burst of
+                    // tasks failing together doesn't stack up toasts.
+                    if self.accounts.contains_key(&a) && !self.schedule_reconnect(a) {
+                        return;
                     }
                 }
                 self.fail(account, error);

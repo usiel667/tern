@@ -13,6 +13,26 @@ grim -g "X,Y WxH" shot.png                           # screenshot a window (geom
 
 ---
 
+## 2026-10-16 — Wrong password made the engine reconnect in a tight loop
+
+**Seen (code review, milestone 2):** any `Error::Auth` rebuilt the backend immediately,
+which failed again, forever, with a toast each time. Several tasks failing at once each
+started their own rebuild. If the rebuild itself failed (e.g. Google token refresh while
+offline) the account stayed dead until restart. A rebuild finishing after the account was
+removed would re-add it.
+
+**Fix:** per-account `AuthRetry` in the engine: first reconnect immediate, then
+`auth_retry_delay` (30 s doubling, capped at 30 min); only one reconnect pending per
+account and only that failure toasts; `Internal::ReconnectFailed` reschedules; a
+successful mailbox list resets the streak; `AccountReady { reconnect: true }` is dropped
+for removed accounts. The backend builder is now `Engine::connect` so tests can inject the
+fake. Tests run an hour on Tokio's paused clock: `wrong_password_backs_off_instead_of_looping`,
+`removed_account_is_not_resurrected_by_a_pending_reconnect`.
+
+**Status:** fixed.
+
+---
+
 ## 2026-10-16 — Outbox could send the same email twice, and lost Bcc on retry
 
 **Seen (code review, milestone 2):** `flush_outbox` (startup + every 5 min) re-dispatched

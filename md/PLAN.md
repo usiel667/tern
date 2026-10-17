@@ -136,7 +136,8 @@ Key decisions:
 2. **Robustness** (in progress):
    - ✅ Outbox: store the SMTP envelope with each row (Bcc survives a resumed send),
      never dispatch a row that's already sending, record failed attempts (schema v2).
-   - ⬜ Rate-limit auth retries.
+   - ✅ Rate-limit auth retries: first reconnect immediate, then 30 s doubling to 30 min;
+     one reconnect at a time per account; failed rebuilds (OAuth refresh offline) retry too.
    - ⬜ Replay `pending_ops` (offline flag/move).
    - ⬜ Load older mail on scroll.
    - ⬜ CONDSTORE/QRESYNC.

@@ -13,6 +13,8 @@ struct Fake {
     log: Mutex<Vec<String>>,
     /// Make `submit` fail as if offline.
     offline: Mutex<bool>,
+    /// Make `list_mailboxes` fail as if the password were wrong.
+    bad_password: Mutex<bool>,
 }
 
 fn env(uid: u32, subject: &str, seen: bool) -> Envelope {
@@ -39,6 +41,10 @@ impl MailBackend for Fake {
         "test"
     }
     async fn list_mailboxes(&self) -> Result<Vec<RemoteMailbox>> {
+        self.log.lock().unwrap().push("list".into());
+        if *self.bad_password.lock().unwrap() {
+            return Err(Error::Auth("bad password".into()));
+        }
         let mb = |id: &str, role| RemoteMailbox {
             remote_id: id.into(),
             name: id.into(),
@@ -255,4 +261,74 @@ async fn flush_during_send_does_not_send_twice() {
     engine.flush_outbox();
     engine.settle().await;
     assert_eq!(submits(&fake).len(), 1);
+}
+
+#[test]
+fn auth_retry_delay_backs_off_and_caps() {
+    let secs: Vec<u64> = (1..=10).map(|n| auth_retry_delay(n).as_secs()).collect();
+    assert_eq!(secs, [0, 30, 60, 120, 240, 480, 960, 1800, 1800, 1800]);
+    assert_eq!(auth_retry_delay(u32::MAX), AUTH_RETRY_MAX);
+}
+
+/// Process engine messages for `d` of (paused, auto-advancing) time.
+async fn run_for(engine: &mut Engine, d: Duration) {
+    let _ = tokio::time::timeout(d, async {
+        while let Some(m) = engine.rx.recv().await {
+            engine.internal(m);
+        }
+    })
+    .await;
+}
+
+fn count(fake: &Fake, what: &str) -> usize {
+    fake.log.lock().unwrap().iter().filter(|l| *l == what).count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn wrong_password_backs_off_instead_of_looping() {
+    let (mut engine, fake, rx, id) = setup().await;
+    let f = fake.clone();
+    engine.connect = Arc::new(move |_| {
+        let b: Arc<dyn MailBackend> = f.clone();
+        Box::pin(async move { Ok(b) })
+    });
+    *fake.bad_password.lock().unwrap() = true;
+    fake.log.lock().unwrap().clear();
+    while rx.try_recv().is_ok() {}
+
+    engine.handle(Command::SyncAll);
+    // First failure reconnects straight away (expired token case), then waits 30s.
+    run_for(&mut engine, Duration::from_secs(10)).await;
+    assert_eq!(count(&fake, "list"), 2);
+    run_for(&mut engine, Duration::from_secs(25)).await;
+    assert_eq!(count(&fake, "list"), 3);
+    // An hour of a wrong password: attempts at 0, 0, 30, 90, 210, 450, 930, 1890 s.
+    run_for(&mut engine, Duration::from_secs(3600 - 35)).await;
+    assert_eq!(count(&fake, "list"), 8);
+    let toasts = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|e| matches!(e, Event::Error { .. }))
+        .count();
+    assert_eq!(toasts, 8, "one error per attempt, not a flood");
+
+    // Password fixed: the next attempt succeeds and the streak resets.
+    *fake.bad_password.lock().unwrap() = false;
+    run_for(&mut engine, AUTH_RETRY_MAX).await;
+    assert!(!engine.auth_retry.contains_key(&id));
+    assert_eq!(count(&fake, "list"), 9);
+}
+
+#[tokio::test(start_paused = true)]
+async fn removed_account_is_not_resurrected_by_a_pending_reconnect() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    let f = fake.clone();
+    engine.connect = Arc::new(move |_| {
+        let b: Arc<dyn MailBackend> = f.clone();
+        Box::pin(async move { Ok(b) })
+    });
+    *fake.bad_password.lock().unwrap() = true;
+    engine.handle(Command::SyncAll);
+    run_for(&mut engine, Duration::from_secs(10)).await; // now waiting 30s to retry
+    engine.handle(Command::RemoveAccount(id));
+    run_for(&mut engine, Duration::from_secs(60)).await;
+    assert!(!engine.accounts.contains_key(&id));
 }
