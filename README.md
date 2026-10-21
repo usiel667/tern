@@ -45,6 +45,9 @@ exec-once = gnome-keyring-daemon --start --components=secrets
 New-mail notifications go through your notification daemon (mako, swaync, dunst).
 
 To install a launcher entry: `install -Dm644 crates/tern/data/dev.tern.Tern.desktop ~/.local/share/applications/`.
+To make Tern open `mailto:` links from your browser and other apps:
+`xdg-mime default dev.tern.Tern.desktop x-scheme-handler/mailto`. You can also run
+`tern 'mailto:ann@example.com?subject=Hi'`; if Tern is already open, the running window handles it.
 There is also a `PKGBUILD` (builds from git).
 
 ### Hyprland window rules (optional)

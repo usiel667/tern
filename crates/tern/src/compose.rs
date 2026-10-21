@@ -17,45 +17,71 @@ pub fn open_new(ui: &Rc<Ui>) {
 }
 
 pub fn open_mailto(ui: &Rc<Ui>, mailto: &str) {
-    // mailto:addr?subject=...&body=...
-    let (addr, query) = mailto.split_once('?').unwrap_or((mailto, ""));
-    let mut draft = Draft {
-        to: parse_addresses(&percent_decode(addr)).unwrap_or_default(),
-        ..Default::default()
-    };
-    for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            match k.to_ascii_lowercase().as_str() {
-                "subject" => draft.subject = percent_decode(v),
-                "body" => draft.text = percent_decode(v),
-                "cc" => draft.cc = parse_addresses(&percent_decode(v)).unwrap_or_default(),
-                _ => {}
-            }
-        }
-    }
-    open(ui, draft, None, None);
+    open(ui, mailto_draft(mailto), None, None);
 }
 
+/// A draft from a `mailto:` URI (RFC 6068), with or without the scheme. Only the fields a
+/// person would fill in are read; everything else, `attach` included, is ignored so a link
+/// can't attach local files or set arbitrary headers.
+pub fn mailto_draft(uri: &str) -> Draft {
+    let rest = match uri.get(..7) {
+        Some(p) if p.eq_ignore_ascii_case("mailto:") => &uri[7..],
+        _ => uri,
+    };
+    let (addr, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let addresses = |s: &str| parse_addresses(&single_line(&percent_decode(s))).unwrap_or_default();
+    let mut draft = Draft { to: addresses(addr), ..Default::default() };
+    for pair in query.split('&') {
+        let Some((k, v)) = pair.split_once('=') else { continue };
+        match percent_decode(k).to_ascii_lowercase().as_str() {
+            "to" => draft.to.extend(addresses(v)),
+            "cc" => draft.cc.extend(addresses(v)),
+            "bcc" => draft.bcc.extend(addresses(v)),
+            "subject" => draft.subject = single_line(&percent_decode(v)),
+            "body" => draft.text = percent_decode(v).replace("\r\n", "\n").replace('\r', "\n"),
+            "in-reply-to" => {
+                let id = single_line(&percent_decode(v));
+                let id = id.trim();
+                if !id.is_empty() {
+                    draft.in_reply_to =
+                        Some(if id.starts_with('<') { id.to_string() } else { format!("<{id}>") });
+                }
+            }
+            _ => {}
+        }
+    }
+    draft
+}
+
+/// Puts the signature after anything already written (a mailto body) and above quoted or
+/// forwarded text, like Apple Mail. Quoted text from `respond` starts with a blank line.
+fn with_signature(text: &str, sig: &str) -> String {
+    if text.is_empty() || text.starts_with('\n') {
+        format!("\n\n-- \n{sig}{text}")
+    } else {
+        format!("{text}\n\n-- \n{sig}")
+    }
+}
+
+/// Header values from a link must not carry line breaks.
+fn single_line(s: &str) -> String {
+    s.replace(['\r', '\n'], " ")
+}
+
+/// Percent-decoding per RFC 3986; `+` is a literal plus in mailto URIs (RFC 6068).
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
-                match u8::from_str_radix(hex, 16) {
-                    Ok(b) => {
-                        out.push(b);
-                        i += 3;
-                        continue;
-                    }
-                    Err(_) => out.push(b'%'),
-                }
-            }
-            b'+' => out.push(b' '),
-            b => out.push(b),
+        if bytes[i] == b'%'
+            && let Some(b) = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
         }
+        out.push(bytes[i]);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -155,11 +181,10 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         .or_else(|| accounts.first().map(|a| a.0))
         .and_then(|a| ui.account_for(a))
         .and_then(|a| a.signature);
-    let mut text = draft.text.clone();
-    if let Some(sig) = signature {
-        // Signature above the quoted text, like Apple Mail.
-        text = format!("\n\n-- \n{sig}{text}");
-    }
+    let text = match signature {
+        Some(sig) => with_signature(&draft.text, &sig),
+        None => draft.text.clone(),
+    };
     body.buffer().set_text(&text);
     body.buffer().place_cursor(&body.buffer().start_iter());
 
@@ -395,11 +420,61 @@ fn do_send(ui: &Rc<Ui>, c: &Rc<Compose>) {
 
 #[cfg(test)]
 mod tests {
-    use super::percent_decode;
+    use super::{mailto_draft, percent_decode, with_signature};
+
+    fn emails(a: &[tern_core::model::Address]) -> Vec<&str> {
+        a.iter().map(|a| a.email.as_str()).collect()
+    }
 
     #[test]
-    fn decodes_mailto_parts() {
-        assert_eq!(percent_decode("Hello%20there+you%21"), "Hello there you!");
+    fn decodes_percent_escapes_but_keeps_plus() {
+        assert_eq!(percent_decode("Hello%20there+you%21"), "Hello there+you!");
         assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("50%2"), "50%2");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn plus_addressing_survives() {
+        assert_eq!(emails(&mailto_draft("mailto:me+tag@example.com").to), ["me+tag@example.com"]);
+    }
+
+    #[test]
+    fn reads_rfc6068_fields() {
+        let d = mailto_draft("MAILTO:a@x.org?to=b@x.org&CC=c@x.org&bcc=d@x.org&Subject=Hi%20there&body=line%201%0D%0Aline%202&In-Reply-To=%3Cm1%40x.org%3E");
+        assert_eq!(emails(&d.to), ["a@x.org", "b@x.org"]);
+        assert_eq!(emails(&d.cc), ["c@x.org"]);
+        assert_eq!(emails(&d.bcc), ["d@x.org"]);
+        assert_eq!(d.subject, "Hi there");
+        assert_eq!(d.text, "line 1\nline 2");
+        assert_eq!(d.in_reply_to.as_deref(), Some("<m1@x.org>"));
+    }
+
+    #[test]
+    fn works_without_scheme_or_address() {
+        let d = mailto_draft("?to=a@x.org,b@x.org&subject=x");
+        assert_eq!(emails(&d.to), ["a@x.org", "b@x.org"]);
+        assert_eq!(mailto_draft("a@x.org").to.len(), 1);
+    }
+
+    #[test]
+    fn ignores_attachments_and_other_headers() {
+        let d = mailto_draft("mailto:x@y.org?attach=/home/me/.ssh/id_rsa&attachment=%2Fetc%2Fpasswd&X-Evil=1&from=boss@y.org");
+        assert!(d.attachments.is_empty());
+        assert!(d.from.is_none());
+        assert_eq!(emails(&d.to), ["x@y.org"]);
+    }
+
+    #[test]
+    fn header_fields_cannot_inject_lines() {
+        let d = mailto_draft("mailto:x@y.org?subject=Hi%0D%0ABcc:%20spy@z.org");
+        assert!(!d.subject.contains('\n') && !d.subject.contains('\r'));
+    }
+
+    #[test]
+    fn signature_goes_between_own_text_and_quote() {
+        assert_eq!(with_signature("", "Tom"), "\n\n-- \nTom");
+        assert_eq!(with_signature("\n\nOn Monday Ann wrote:\n> hi", "Tom"), "\n\n-- \nTom\n\nOn Monday Ann wrote:\n> hi");
+        assert_eq!(with_signature("hello\nworld", "Tom"), "hello\nworld\n\n-- \nTom");
     }
 }

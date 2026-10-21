@@ -4,6 +4,7 @@
 //!   tern              normal mode (accounts from ~/.config/tern/accounts.toml)
 //!   tern --demo       sample account, no network, nothing saved
 //!   tern --profile D  keep config and cache under directory D
+//!   tern mailto:…     open a New Message from a mailto: link (in the running Tern if there is one)
 
 mod accounts;
 mod app;
@@ -13,7 +14,11 @@ mod message_list;
 mod sidebar;
 mod viewer;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use adw::prelude::*;
+use gtk::gio;
 
 pub const APP_ID: &str = "dev.tern.Tern";
 
@@ -32,7 +37,7 @@ fn parse_args() -> (Args, Vec<String>) {
             "--demo" => args.demo = true,
             "--profile" => args.profile = it.next().map(Into::into),
             "-h" | "--help" => {
-                println!("tern [--demo] [--profile DIR]");
+                println!("tern [--demo] [--profile DIR] [mailto:URI…]");
                 std::process::exit(0);
             }
             _ => gtk_args.push(a),
@@ -52,14 +57,34 @@ fn main() -> gtk::glib::ExitCode {
     let (args, gtk_args) = parse_args();
     let app = adw::Application::builder()
         .application_id(if args.demo { "dev.tern.Tern.Demo" } else { APP_ID })
+        .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
     app.connect_startup(|_| app::load_css());
-    app.connect_activate(move |app| {
-        if let Some(win) = app.active_window() {
-            win.present();
-            return;
+    // Both handlers run in the primary instance; a second `tern` forwards to it over D-Bus.
+    let ui: Rc<RefCell<Option<Rc<app::Ui>>>> = Rc::default();
+    let ensure_ui = move |app: &adw::Application| -> Option<Rc<app::Ui>> {
+        if let Some(ui) = ui.borrow().as_ref() {
+            ui.window.present();
+            return Some(ui.clone());
         }
-        app::build(app, args.clone());
+        let built = app::build(app, args.clone());
+        *ui.borrow_mut() = built.clone();
+        built
+    };
+    let ensure = ensure_ui.clone();
+    app.connect_activate(move |app| {
+        ensure(app);
+    });
+    app.connect_open(move |app, files, _| {
+        let Some(ui) = ensure_ui(app) else { return };
+        for file in files {
+            let uri = file.uri();
+            if uri.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:")) {
+                compose::open_mailto(&ui, &uri);
+            } else {
+                ui.toast("Tern can only open mailto: links");
+            }
+        }
     });
     app.run_with_args(&gtk_args)
 }

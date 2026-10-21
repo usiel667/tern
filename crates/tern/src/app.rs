@@ -51,7 +51,8 @@ pub fn load_css() {
     );
 }
 
-pub fn build(app: &adw::Application, args: Args) {
+/// Builds the main window; `None` when startup failed (an error dialog is shown instead).
+pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
     let (engine, demo) = match start_engine(&args) {
         Ok(e) => e,
         Err(e) => {
@@ -62,7 +63,7 @@ pub fn build(app: &adw::Application, args: Args) {
             d.connect_response(None, move |_, _| a.quit());
             win.present();
             d.present(Some(&win));
-            return;
+            return None;
         }
     };
     let store = match Store::open(&engine.paths.database) {
@@ -70,7 +71,7 @@ pub fn build(app: &adw::Application, args: Args) {
         Err(e) => {
             eprintln!("cannot open mail cache: {e}");
             app.quit();
-            return;
+            return None;
         }
     };
     let accounts = if demo {
@@ -161,6 +162,7 @@ pub fn build(app: &adw::Application, args: Args) {
     if !demo && ui.accounts.borrow().is_empty() {
         ui.list.show_welcome(true);
     }
+    Some(ui)
 }
 
 fn start_engine(args: &Args) -> Result<(EngineHandle, bool), String> {

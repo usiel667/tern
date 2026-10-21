@@ -122,7 +122,7 @@ Key decisions:
 | Save to Drafts / autosave | ⬜ | APPEND to Drafts |
 | Send later, Undo Send | ⬜ | outbox delay makes Undo Send easy |
 | Sent copy filed in Sent | ✅ | skipped for Gmail (server does it) |
-| mailto: handler | 🟡 | in-message links work; CLI arg + .desktop MimeType TODO |
+| mailto: handler | ✅ | in-message links, `tern mailto:…` (single instance), .desktop MimeType; RFC 6068 fields only, `attach` ignored |
 
 ### Settings
 | Feature | Status | Notes |
@@ -148,8 +148,16 @@ Key decisions:
      CONDSTORE → CHANGEDSINCE + UID SEARCH, neither → full check; full check every 50th sync.
      Live-tested against the local Dovecot in all three modes (OpenSpec change `imap-condstore-qresync`).
    - ⬜ JMAP EventSource push.
-3. **Compose polish:** drafts/autosave, address autocomplete, drag-and-drop attachments,
-   Undo Send, signature editor, mailto: CLI handler.
+3. **Compose polish** (in progress):
+   - ✅ mailto: handler: `tern mailto:…` opens in the running instance (GApplication
+     `HANDLES_OPEN`), desktop file registers `x-scheme-handler/mailto`, RFC 6068 parser
+     (literal `+`, repeated recipients, no `attach`); a link's body goes above the signature
+     (OpenSpec change `mailto-handler`).
+   - ⬜ Address autocomplete from history.
+   - ⬜ Drag-and-drop attachments.
+   - ⬜ Save to Drafts / autosave.
+   - ⬜ Undo Send (outbox delay).
+   - ⬜ Signature editor.
 4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
 5. **Reading polish:** full stacked conversation view, open-in-window, print, view source,
    RFC 8058 one-click unsubscribe, Quick Look via xdg-open.
