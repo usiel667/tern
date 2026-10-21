@@ -23,6 +23,11 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
+- **2026-10-21 — Size limits and Unsent Messages:** attaching warns against the account's
+  real limit; Send shows a "Message Too Large" dialog (size vs. what the server accepts) and
+  keeps the window open. A refused send shows a toast with **Review**; Main Menu → Unsent
+  Messages… lists refused messages (subject, To, reason) with Edit / Try Again / Delete icon
+  buttons. Ctrl+Return now sends from the message body too.
 - **2026-10-20 — Folders attach as zips:** dropping a folder shows a "Compressing “Name”…"
   chip with a spinner in the attachment strip, then a normal `Name.zip` chip. Send is
   refused with a notice while anything is still compressing.

@@ -13,6 +13,7 @@ mod compose;
 mod folder_zip;
 mod format;
 mod message_list;
+mod outbox;
 mod sidebar;
 mod viewer;
 

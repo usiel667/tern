@@ -19,6 +19,22 @@ dev/test-imap-server.sh start                        # local Dovecot for live te
 eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
 ```
 
+## 2026-10-21 — Refused JMAP sends vanished; Ctrl+Return in the body didn't send
+
+**Saw (code review while adding size limits):** `JmapBackend::submit` ignored `notCreated`
+in the `Email/import` / `EmailSubmission/set` responses, so a submission the server refused
+(e.g. `tooLarge`) returned Ok — the engine deleted it from the outbox as sent. Upload 413s
+were `Network` errors and retried forever. Separately, in the test display Ctrl+Return with
+the cursor in the message body inserted a line break instead of sending.
+
+**Cause / fix:** JMAP now turns `notCreated` and 413 into `Error::Rejected` (kept as
+unsent, not retried). The body `TextView` handles Ctrl+Return before the window's
+bubble-phase key controller; sending moved to the capture-phase controller (next to
+Shift+Ctrl+A). Earlier send tests had focus in the To field, which is why it went unseen.
+
+**Also:** smtp.gmail.com advertises `SIZE 35882577`, smtp.mail.me.com `SIZE 28319744`
+(2026-10-21, `cargo test -p tern-smtp --test live -- --ignored`).
+
 ## 2026-10-20 — Dropping files from Dolphin did nothing
 
 **Saw:** dragging a file from Dolphin onto a New Message attached nothing (owner's report).

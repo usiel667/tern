@@ -24,6 +24,10 @@ struct Fake {
     older_rejects: Mutex<bool>,
     /// Make `list_mailboxes` fail as if the password were wrong.
     bad_password: Mutex<bool>,
+    /// Make `submit` fail as a server refusing the message would.
+    refuse_submit: Mutex<bool>,
+    /// What `send_limit` reports.
+    limit: Mutex<Option<u64>>,
 }
 
 fn env(uid: u32, subject: &str, seen: bool) -> Envelope {
@@ -142,9 +146,16 @@ impl MailBackend for Fake {
     fn handles_submission(&self) -> bool {
         true
     }
+    async fn send_limit(&self) -> Result<Option<u64>> {
+        Ok(*self.limit.lock().unwrap())
+    }
     async fn submit(&self, raw: &[u8], from: &str, rcpts: &[String]) -> Result<()> {
         assert!(!raw.is_empty());
         self.check_online()?;
+        if *self.refuse_submit.lock().unwrap() {
+            self.log.lock().unwrap().push("refused submit".into());
+            return Err(Error::Rejected("552 message too large".into()));
+        }
         self.log.lock().unwrap().push(format!("submit {from} {rcpts:?}"));
         Ok(())
     }
@@ -716,4 +727,82 @@ async fn demo_history_loads_until_exhausted() {
     let archive = engine.store().mailbox_by_role(id, MailboxRole::Archive).unwrap().unwrap().id;
     let rows = engine.store().list(&ListScope::Mailbox(archive), false, 50).unwrap();
     assert!(rows.iter().any(|m| m.envelope.remote_id == oldest));
+}
+
+fn events(rx: &async_channel::Receiver<Event>) -> Vec<Event> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+#[tokio::test]
+async fn refused_send_is_kept_and_not_retried() {
+    let (mut engine, fake, rx, id) = setup().await;
+    let _ = events(&rx);
+    *fake.refuse_submit.lock().unwrap() = true;
+    let mut draft = draft_with_bcc();
+    draft.subject = "Big report".into();
+    engine.handle(Command::Send { account: id, draft: Box::new(draft), responding_to: None });
+    engine.settle().await;
+
+    assert!(engine.store().outbox().unwrap().is_empty(), "no longer queued");
+    let refused = engine.store().outbox_rejected().unwrap();
+    assert_eq!(refused.len(), 1, "kept for the user");
+    assert_eq!(refused[0].last_error.as_deref(), Some("552 message too large"));
+    let evs = events(&rx);
+    assert!(
+        evs.iter().any(|e| matches!(e, Event::SendRejected { subject, reason, .. }
+            if subject == "Big report" && reason == "552 message too large")),
+        "{evs:?}"
+    );
+    assert!(!evs.iter().any(|e| matches!(e, Event::Error { .. })), "one notice, not a generic error too");
+
+    engine.flush_outbox();
+    engine.settle().await;
+    assert_eq!(count(&fake, "refused submit"), 1, "the periodic flush doesn't resend it");
+
+    // Try Again once the problem is fixed.
+    *fake.refuse_submit.lock().unwrap() = false;
+    engine.handle(Command::RetrySend(refused[0].id));
+    engine.settle().await;
+    assert_eq!(submits(&fake).len(), 1);
+    assert!(engine.store().outbox_rejected().unwrap().is_empty());
+    assert!(engine.store().outbox().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn refused_send_can_be_discarded() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.refuse_submit.lock().unwrap() = true;
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.settle().await;
+    let refused = engine.store().outbox_rejected().unwrap();
+    engine.handle(Command::DiscardSend(refused[0].id));
+    engine.settle().await;
+    assert!(engine.store().outbox_rejected().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn over_the_limit_is_refused_without_uploading() {
+    let (mut engine, fake, rx, id) = setup().await;
+    *fake.limit.lock().unwrap() = Some(100);
+    engine.probe_send_limit(id);
+    engine.settle().await;
+    assert!(
+        events(&rx).iter().any(|e| matches!(e, Event::SendLimit { bytes: Some(100), .. })),
+        "the UI hears about the limit"
+    );
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.settle().await;
+    assert!(submits(&fake).is_empty(), "never sent to the server");
+    let refused = engine.store().outbox_rejected().unwrap();
+    assert!(refused[0].last_error.as_deref().unwrap().contains("accepts up to"), "{refused:?}");
+}
+
+#[tokio::test]
+async fn network_failure_still_retries() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.settle().await;
+    assert_eq!(engine.store().outbox().unwrap().len(), 1, "still queued");
+    assert!(engine.store().outbox_rejected().unwrap().is_empty());
 }

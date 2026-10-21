@@ -25,7 +25,7 @@ use tern_jmap::JmapBackend;
 use serde::{Deserialize, Serialize};
 use tern_store::Store;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub use config::Paths;
 
@@ -141,6 +141,10 @@ pub enum Command {
         /// Mark this message \Answered / $Forwarded once sent.
         responding_to: Option<(MessageId, FlagChange)>,
     },
+    /// Put a refused message (see `Event::SendRejected`) back in line and send it now.
+    RetrySend(i64),
+    /// Forget a queued or refused message without sending it.
+    DiscardSend(i64),
     /// Persist a new account and start syncing it. Secrets must already be in the keyring.
     AddAccount(Box<AccountConfig>),
     RemoveAccount(AccountId),
@@ -159,6 +163,14 @@ pub enum Event {
     /// For desktop notifications and the unread badge.
     NewMail { account: AccountId, from: String, subject: String, id: MessageId },
     Sent,
+    /// The largest message (encoded bytes) this account's server accepts; `None` if unknown
+    /// or unlimited. Sent whenever the account connects.
+    SendLimit { account: AccountId, bytes: Option<u64> },
+    /// A server refused a message for good. It's kept (see `Store::outbox_rejected`) until
+    /// the user edits, retries or deletes it.
+    SendRejected { outbox_id: i64, account: AccountId, subject: String, reason: String },
+    /// Rows were added to or removed from the refused list.
+    OutboxChanged,
     Error { account: Option<AccountId>, message: String },
 }
 
@@ -171,8 +183,11 @@ enum Internal {
     Sent { outbox_id: i64, account: AccountId, responding_to: Option<(MessageId, FlagChange)> },
     /// A queued message action finished (or failed) on the server.
     OpDone { account: AccountId, id: i64, op: Op, result: Result<()> },
-    /// A queued send failed; it stays in the outbox for the next flush.
+    /// A queued send failed; it stays in the outbox for the next flush (or, if the
+    /// server refused it, is marked rejected).
     SendFailed { outbox_id: i64, account: AccountId, error: Error },
+    /// Result of asking the server for its message size limit.
+    SendLimit(AccountId, Option<u64>),
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
     /// A (re)built backend for an account, ready to start syncing. `reconnect`
     /// is set for rebuilds of an existing account (dropped if it was removed meanwhile).
@@ -273,6 +288,8 @@ pub struct Engine {
     in_flight: HashMap<AccountId, usize>,
     /// Outbox rows with a send in flight, so a flush doesn't send them twice.
     sending: std::collections::HashSet<i64>,
+    /// Each account's message size limit, when the server told us.
+    send_limits: HashMap<AccountId, u64>,
     auth_retry: HashMap<AccountId, AuthRetry>,
     connect: Connect,
     /// Accounts with a queued op in flight; ops run one at a time per account.
@@ -316,6 +333,7 @@ impl Engine {
             syncing: Default::default(),
             in_flight: Default::default(),
             sending: Default::default(),
+            send_limits: Default::default(),
             auth_retry: Default::default(),
             connect: Arc::new(|cfg| Box::pin(async move { backend_for(&cfg).await })),
             draining: Default::default(),
@@ -385,6 +403,49 @@ impl Engine {
     fn start_account(&mut self, id: AccountId) {
         self.refresh_mailboxes(id);
         self.watch_inbox(id);
+        self.probe_send_limit(id);
+    }
+
+    /// Ask the account's sending server how large a message it accepts: the JMAP session for
+    /// backends that submit mail themselves, otherwise the SMTP server's EHLO `SIZE`.
+    fn probe_send_limit(&mut self, id: AccountId) {
+        let Some(acct) = self.accounts.get(&id) else { return };
+        let backend = acct.backend.clone();
+        let cfg = acct.cfg.clone();
+        self.spawn_task(id, async move {
+            let limit = if backend.handles_submission() {
+                backend.send_limit().await
+            } else if let Transport::Imap { smtp, .. } = &cfg.transport {
+                tern_smtp::size_limit(smtp).await
+            } else {
+                Ok(None)
+            };
+            match limit {
+                Ok(bytes) => Internal::SendLimit(id, bytes),
+                Err(e) => {
+                    // Not worth a notice: without a limit the server's answer decides.
+                    debug!(%id, "couldn't learn the send size limit: {e}");
+                    Internal::SendLimit(id, None)
+                }
+            }
+        });
+    }
+
+    fn retry_send(&mut self, id: i64) {
+        if let Err(e) = self.store.outbox_retry(id) {
+            return self.fail(None, e);
+        }
+        self.emit(Event::OutboxChanged);
+        match self.store.outbox_item(id) {
+            Ok(Some(item)) => {
+                let account = item.account;
+                if let Some(out) = outgoing_from_item(item) {
+                    self.dispatch_outgoing(id, account, out, None);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => self.fail(None, e),
+        }
     }
 
     fn spawn_task(&mut self, account: AccountId, fut: impl Future<Output = Internal> + Send + 'static) {
@@ -530,6 +591,13 @@ impl Engine {
             Command::SetFlags(ids, change) => self.set_flags(ids, change),
             Command::Move(ids, target) => self.move_messages(ids, target),
             Command::Send { account, draft, responding_to } => self.send(account, *draft, responding_to),
+            Command::RetrySend(id) => self.retry_send(id),
+            Command::DiscardSend(id) => {
+                if let Err(e) = self.store.outbox_done(id) {
+                    return self.fail(None, e);
+                }
+                self.emit(Event::OutboxChanged);
+            }
             Command::AddAccount(cfg) => self.add_account(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),
             Command::Shutdown => {}
@@ -771,6 +839,14 @@ impl Engine {
         if !self.sending.insert(outbox_id) {
             return;
         }
+        // Don't upload what the server has said it won't take (e.g. queued before the
+        // limit was known); refuse it the same way the server would.
+        if let Some(&limit) = self.send_limits.get(&account)
+            && out.raw.len() as u64 > limit
+        {
+            let error = Error::Rejected(too_large(out.raw.len() as u64, limit));
+            return self.internal(Internal::SendFailed { outbox_id, account, error });
+        }
         let backend = acct.backend.clone();
         let cfg = acct.cfg.clone();
         let sent_box = self
@@ -876,6 +952,7 @@ impl Engine {
     fn remove_account(&mut self, id: AccountId) {
         self.accounts.remove(&id);
         self.auth_retry.remove(&id);
+        self.send_limits.remove(&id);
         self.draining.remove(&id);
         if let Err(e) = self.store.pending_clear(id) {
             self.fail(Some(id), e);
@@ -1028,6 +1105,7 @@ impl Engine {
                     self.start_account(id);
                 } else {
                     self.refresh_mailboxes(id);
+                    self.probe_send_limit(id);
                 }
             }
             Internal::ReconnectFailed(cfg, error) => {
@@ -1086,10 +1164,33 @@ impl Engine {
             }
             Internal::SendFailed { outbox_id, account, error } => {
                 self.sending.remove(&outbox_id);
+                if let Error::Rejected(reason) = &error {
+                    // Sending it again won't help: keep it for the user and stop retrying.
+                    if let Err(e) = self.store.outbox_reject(outbox_id, reason) {
+                        return self.fail(Some(account), e);
+                    }
+                    let subject = self
+                        .store
+                        .outbox_item(outbox_id)
+                        .ok()
+                        .flatten()
+                        .map(|i| outbox_subject(&i.raw))
+                        .unwrap_or_default();
+                    self.emit(Event::SendRejected { outbox_id, account, subject, reason: reason.clone() });
+                    self.emit(Event::OutboxChanged);
+                    return;
+                }
                 if let Err(e) = self.store.outbox_failed(outbox_id, &error.to_string()) {
                     self.fail(Some(account), e);
                 }
                 self.internal(Internal::Failed { account: Some(account), mailbox: None, error });
+            }
+            Internal::SendLimit(account, bytes) => {
+                match bytes {
+                    Some(n) => self.send_limits.insert(account, n),
+                    None => self.send_limits.remove(&account),
+                };
+                self.emit(Event::SendLimit { account, bytes });
             }
             Internal::Failed { account, mailbox, error } => {
                 if let Some(m) = mailbox {
@@ -1112,6 +1213,18 @@ impl Engine {
             }
         }
     }
+}
+
+/// "The message is 41.2 MB; the server accepts up to 34.2 MB."
+pub fn too_large(size: u64, limit: u64) -> String {
+    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+    format!("The message is {:.1} MB; the server accepts up to {:.1} MB.", mb(size), mb(limit))
+}
+
+/// Subject of a queued message, for notices.
+fn outbox_subject(raw: &[u8]) -> String {
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+    tern_core::mime::envelope_from_parts(String::new(), &raw[..split], None, Flags::default(), 0, None).subject
 }
 
 /// Turn a queued row back into an `Outgoing`, using its stored SMTP envelope.

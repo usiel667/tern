@@ -3,7 +3,7 @@
 use chrono::{TimeZone, Utc};
 use mail_parser::{HeaderValue, MessageParser, MimeHeaders};
 
-use crate::model::{Address, Attachment, Envelope, Flags, MessageBody};
+use crate::model::{Address, Attachment, Draft, Envelope, Flags, MessageBody, OutgoingAttachment};
 
 const PREVIEW_CHARS: usize = 200;
 
@@ -135,6 +135,48 @@ pub fn body_from_raw(raw: Vec<u8>) -> MessageBody {
 }
 
 /// Bytes of attachment `index` (as numbered in [`MessageBody::attachments`]).
+/// Rebuild an editable [`Draft`] from a message Tern built (a refused send). `envelope_rcpts`
+/// is the SMTP envelope's recipient list: whoever is in it but not in To/Cc was Bcc, which
+/// never appears in the headers.
+pub fn draft_from_raw(raw: &[u8], envelope_rcpts: &[String]) -> Option<Draft> {
+    let msg = MessageParser::default().parse(raw)?;
+    let to = addrs(msg.to());
+    let cc = addrs(msg.cc());
+    let visible: Vec<String> = to.iter().chain(&cc).map(|a| a.email.to_ascii_lowercase()).collect();
+    let bcc = envelope_rcpts
+        .iter()
+        .filter(|r| !visible.contains(&r.to_ascii_lowercase()))
+        .map(|r| Address::new(None, r))
+        .collect();
+    let attachments = msg
+        .attachments()
+        .filter(|a| a.content_disposition().is_none_or(|d| !d.is_inline()) || a.attachment_name().is_some())
+        .map(|a| OutgoingAttachment {
+            filename: a.attachment_name().unwrap_or("attachment").to_owned(),
+            mime_type: a
+                .content_type()
+                .map(|ct| match ct.subtype() {
+                    Some(sub) => format!("{}/{sub}", ct.ctype()),
+                    None => ct.ctype().to_owned(),
+                })
+                .unwrap_or_else(|| "application/octet-stream".into()),
+            data: a.contents().to_vec(),
+        })
+        .collect();
+    Some(Draft {
+        from: addrs(msg.from()).into_iter().next(),
+        to,
+        cc,
+        bcc,
+        subject: msg.subject().unwrap_or_default().to_owned(),
+        text: msg.body_text(0).map(|t| t.replace("\r\n", "\n").trim_end().to_owned()).unwrap_or_default(),
+        html: None,
+        in_reply_to: id_list(msg.in_reply_to()).into_iter().next(),
+        references: id_list(msg.references()),
+        attachments,
+    })
+}
+
 pub fn attachment_bytes(raw: &[u8], index: u32) -> Option<Vec<u8>> {
     let parser = MessageParser::default();
     let msg = parser.parse(raw)?;

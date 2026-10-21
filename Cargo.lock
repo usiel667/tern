@@ -2932,6 +2932,7 @@ dependencies = [
  "tern-auth",
  "tern-core",
  "tern-imap",
+ "tern-smtp",
  "tern-store",
  "tern-sync",
  "tokio",
@@ -3003,6 +3004,7 @@ dependencies = [
  "mail-parser",
  "tern-auth",
  "tern-core",
+ "tokio",
 ]
 
 [[package]]

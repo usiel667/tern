@@ -12,15 +12,21 @@ use tern_sync::{Command, FlagChange};
 use crate::app::Ui;
 use crate::folder_zip::MAX_FOLDER_BYTES;
 use crate::format::{
-    crosses_size_limit, format_addresses, human_size, mime_for, parse_addresses, parse_uri_list, LARGE_ATTACHMENTS,
+    crosses_limit, estimated_message_size, format_addresses, human_size, mime_for, parse_addresses, parse_uri_list,
+    LARGE_ATTACHMENTS,
 };
 
 pub fn open_new(ui: &Rc<Ui>) {
-    open(ui, Draft::default(), None, None);
+    open(ui, Draft::default(), None, None, true);
+}
+
+/// Reopen a message that couldn't be sent, as it was (its signature is already in the text).
+pub fn open_unsent(ui: &Rc<Ui>, draft: Draft, account: AccountId) {
+    open(ui, draft, Some(account), None, false);
 }
 
 pub fn open_mailto(ui: &Rc<Ui>, mailto: &str) {
-    open(ui, mailto_draft(mailto), None, None);
+    open(ui, mailto_draft(mailto), None, None, true);
 }
 
 /// A draft from a `mailto:` URI (RFC 6068), with or without the scheme. Only the fields a
@@ -114,7 +120,7 @@ pub fn open_response(ui: &Rc<Ui>, id: MessageId, kind: ReplyKind) {
         }
     }
     let change = if kind == ReplyKind::Forward { FlagChange::Forwarded } else { FlagChange::Answered };
-    open(ui, draft, Some(m.account), Some((id, change)));
+    open(ui, draft, Some(m.account), Some((id, change)), true);
 }
 
 struct Compose {
@@ -134,6 +140,21 @@ struct Compose {
     references: Vec<String>,
     responding: Option<(MessageId, FlagChange)>,
     toasts: adw::ToastOverlay,
+    ui: std::rc::Weak<Ui>,
+}
+
+impl Compose {
+    /// The selected From account and its server's size limit, if known.
+    fn send_limit(&self) -> (AccountId, Option<u64>) {
+        let account = self.accounts[self.from.selected() as usize].0;
+        let limit = self.ui.upgrade().and_then(|ui| ui.send_limits.borrow().get(&account).copied());
+        (account, limit)
+    }
+
+    fn body_len(&self) -> u64 {
+        let buf = self.body.buffer();
+        buf.text(&buf.start_iter(), &buf.end_iter(), false).len() as u64
+    }
 }
 
 fn field(label: &str, entry: &gtk::Entry) -> gtk::Box {
@@ -147,7 +168,13 @@ fn field(label: &str, entry: &gtk::Entry) -> gtk::Box {
     b
 }
 
-fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Option<(MessageId, FlagChange)>) {
+fn open(
+    ui: &Rc<Ui>,
+    draft: Draft,
+    account: Option<AccountId>,
+    responding: Option<(MessageId, FlagChange)>,
+    add_signature: bool,
+) {
     let accounts: Vec<(AccountId, Address)> =
         ui.accounts.borrow().iter().map(|a| (a.id, a.identity.clone())).collect();
     if accounts.is_empty() {
@@ -185,7 +212,8 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
     let signature = account
         .or_else(|| accounts.first().map(|a| a.0))
         .and_then(|a| ui.account_for(a))
-        .and_then(|a| a.signature);
+        .and_then(|a| a.signature)
+        .filter(|_| add_signature);
     let text = match signature {
         Some(sig) => with_signature(&draft.text, &sig),
         None => draft.text.clone(),
@@ -290,6 +318,7 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         references: draft.references,
         responding,
         toasts,
+        ui: Rc::downgrade(ui),
     });
     refresh_attachments(&c);
     {
@@ -390,16 +419,11 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
             c2.window.set_title(Some(if t.is_empty() { "New Message" } else { t.as_str() }));
         });
     }
-    // Ctrl+Return sends; Escape asks before discarding.
+    // Escape asks before discarding. Bubble phase, so an open suggestion list gets it first.
     let keys = gtk::EventControllerKey::new();
     {
-        let (c2, ui2) = (c.clone(), ui.clone());
-        keys.connect_key_pressed(move |_, key, _, mods| {
-            if key == gdk::Key::Return && mods.contains(gdk::ModifierType::CONTROL_MASK) {
-                do_send(&ui2, &c2);
-                return glib::Propagation::Stop;
-            }
-
+        let c2 = c.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
             if key == gdk::Key::Escape {
                 c2.window.close();
                 return glib::Propagation::Stop;
@@ -408,13 +432,18 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         });
     }
     c.window.add_controller(keys);
-    // Shift+Ctrl+A attaches (Apple Mail's ⇧⌘A). Capture phase: text fields bind it to
-    // "unselect all" and would swallow it before the window's bubble-phase handler.
+    // Ctrl+Return sends and Shift+Ctrl+A attaches (Apple Mail's ⇧⌘A). Capture phase: the
+    // body inserts a line break for Ctrl+Return and text fields bind Shift+Ctrl+A to
+    // "unselect all", so both would be swallowed before a bubble-phase handler.
     let attach_key = gtk::EventControllerKey::new();
     attach_key.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
-        let c2 = c.clone();
+        let (c2, ui2) = (c.clone(), ui.clone());
         attach_key.connect_key_pressed(move |_, key, _, mods| {
+            if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && mods.contains(gdk::ModifierType::CONTROL_MASK) {
+                do_send(&ui2, &c2);
+                return glib::Propagation::Stop;
+            }
             if matches!(key, gdk::Key::A | gdk::Key::a)
                 && mods.contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
             {
@@ -581,11 +610,23 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
                 Err(e) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t read “{name}”: {e}"))),
             }
         }
-        if crosses_size_limit(before, total(&c)) {
-            c.toasts.add_toast(adw::Toast::new(&format!(
-                "Attachments are over {} — many mail servers reject messages that large",
-                human_size(LARGE_ATTACHMENTS)
-            )));
+        let after = total(&c);
+        let warning = match c.send_limit().1 {
+            // The server told us its limit: compare the likely encoded size with it.
+            Some(limit) => {
+                let text = c.body_len();
+                crosses_limit(estimated_message_size(text, before), estimated_message_size(text, after), limit)
+                    .then(|| format!("This message will likely be too large: the server accepts up to {}", human_size(limit)))
+            }
+            None => crosses_limit(before, after, LARGE_ATTACHMENTS).then(|| {
+                format!(
+                    "Attachments are over {} — many mail servers reject messages that large",
+                    human_size(LARGE_ATTACHMENTS)
+                )
+            }),
+        };
+        if let Some(w) = warning {
+            c.toasts.add_toast(adw::Toast::new(&w));
         }
     });
 }
@@ -623,6 +664,25 @@ fn do_send(ui: &Rc<Ui>, c: &Rc<Compose>) {
         references: c.references.clone(),
         attachments: c.attachments.borrow().clone(),
     };
+    // Measure the real message against what the server said it accepts, so an oversized
+    // message is fixed here instead of being refused after it leaves the window.
+    if let Some(limit) = c.send_limit().1
+        && let Ok(out) = tern_smtp::build(&draft)
+        && out.raw.len() as u64 > limit
+    {
+        let server = ui.account_for(account).map(|a| a.description).unwrap_or_else(|| "The server".into());
+        let d = adw::AlertDialog::new(
+            Some("Message Too Large"),
+            Some(&format!(
+                "This message is {}, but {server} accepts messages up to {}. Remove some attachments and try again.",
+                human_size(out.raw.len() as u64),
+                human_size(limit)
+            )),
+        );
+        d.add_response("ok", "OK");
+        d.present(Some(&c.window));
+        return;
+    }
     // The signature is already in the body; don't let the engine add it again.
     ui.send(Command::Send { account, draft: Box::new(draft), responding_to: c.responding });
     c.window.set_widget_name("sent");

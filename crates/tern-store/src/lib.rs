@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub struct Store {
     conn: Connection,
@@ -581,12 +581,28 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Messages waiting to be sent (not ones the server refused), oldest first.
     pub fn outbox(&self) -> Result<Vec<OutboxItem>> {
+        self.outbox_where("rejected = 0", [])
+    }
+
+    /// Messages a server refused for good, oldest first; kept until edited, retried or deleted.
+    pub fn outbox_rejected(&self) -> Result<Vec<OutboxItem>> {
+        self.outbox_where("rejected = 1", [])
+    }
+
+    pub fn outbox_item(&self, id: i64) -> Result<Option<OutboxItem>> {
+        Ok(self.outbox_where("id = ?1", [id])?.into_iter().next())
+    }
+
+    fn outbox_where<P: rusqlite::Params>(&self, filter: &str, args: P) -> Result<Vec<OutboxItem>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, account, raw, envelope, attempts, last_error FROM outbox ORDER BY created, id")
+            .prepare(&format!(
+                "SELECT id, account, raw, envelope, attempts, last_error FROM outbox WHERE {filter} ORDER BY created, id"
+            ))
             .map_err(db)?;
-        stmt.query_map([], |r| {
+        stmt.query_map(args, |r| {
             let envelope = r
                 .get::<_, Option<String>>(3)?
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -607,6 +623,23 @@ impl Store {
         .map_err(db)?
         .collect::<rusqlite::Result<_>>()
         .map_err(db)
+    }
+
+    /// The server refused this message for good: keep it, but stop sending it.
+    pub fn outbox_reject(&mut self, id: i64, err: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE outbox SET rejected = 1, attempts = attempts + 1, last_error = ?2 WHERE id = ?1",
+                params![id, err],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    /// Put a refused message back in line to be sent.
+    pub fn outbox_retry(&mut self, id: i64) -> Result<()> {
+        self.conn.execute("UPDATE outbox SET rejected = 0 WHERE id = ?1", [id]).map_err(db)?;
+        Ok(())
     }
 
     pub fn outbox_done(&mut self, id: i64) -> Result<()> {
@@ -694,10 +727,29 @@ impl Store {
 /// Upgrade an existing database from `from` to `SCHEMA_VERSION`, one step at a time.
 fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 2 {
-        conn.execute_batch("ALTER TABLE outbox ADD COLUMN envelope TEXT;").map_err(db)?;
+        add_column(conn, "outbox", "envelope", "TEXT")?;
     }
     if from < 3 {
         backfill_contacts(conn)?;
+    }
+    if from < 4 {
+        add_column(conn, "outbox", "rejected", "INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
+/// `ALTER TABLE … ADD COLUMN` unless the column is already there (a half-finished upgrade
+/// shouldn't make every later start fail).
+fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            &format!("SELECT COUNT(*) > 0 FROM pragma_table_info('{table}') WHERE name = ?1"),
+            [column],
+            |r| r.get(0),
+        )
+        .map_err(db)?;
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};")).map_err(db)?;
     }
     Ok(())
 }

@@ -359,3 +359,40 @@ fn migration_to_v3_learns_cached_mail() {
     assert_eq!(emails(&s.suggest_addresses("ch", 8).unwrap()), ["maya@example.com"]);
     assert_eq!(emails(&s.suggest_addresses("nora", 8).unwrap()), ["nora@work.com"]);
 }
+
+#[test]
+fn rejected_sends_leave_the_queue_but_are_kept() {
+    let (mut s, acct, _, _) = setup();
+    let a = s.outbox_push(acct, b"A", "tom@x.com", &["ann@x.com".into()]).unwrap();
+    let b = s.outbox_push(acct, b"B", "tom@x.com", &["bob@x.com".into()]).unwrap();
+    s.outbox_reject(a, "552 message too large").unwrap();
+    let queued: Vec<i64> = s.outbox().unwrap().iter().map(|i| i.id).collect();
+    assert_eq!(queued, [b], "refused messages aren't retried");
+    let refused = s.outbox_rejected().unwrap();
+    assert_eq!((refused[0].id, refused[0].last_error.as_deref()), (a, Some("552 message too large")));
+    assert_eq!(s.outbox_item(a).unwrap().unwrap().raw, b"A");
+    s.outbox_retry(a).unwrap();
+    assert_eq!(s.outbox().unwrap().len(), 2);
+    assert!(s.outbox_rejected().unwrap().is_empty());
+    assert!(s.outbox_item(999).unwrap().is_none());
+}
+
+#[test]
+fn migrates_v3_outbox_to_v4() {
+    let (s, acct, _, _) = setup();
+    // A v3 outbox: no `rejected` column.
+    s.conn
+        .execute_batch(
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (id INTEGER PRIMARY KEY, account TEXT NOT NULL, raw BLOB NOT NULL,
+                 envelope TEXT, created INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT);
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    s.conn
+        .execute("INSERT INTO outbox (account, raw, created) VALUES (?1, x'41', 1)", [acct.to_string()])
+        .unwrap();
+    let s = Store::init(s.conn).unwrap();
+    assert_eq!(s.outbox().unwrap().len(), 1, "queued v3 rows stay queued");
+    assert!(s.outbox_rejected().unwrap().is_empty());
+}

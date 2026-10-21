@@ -126,6 +126,12 @@ pub trait MailBackend: Send + Sync {
         false
     }
 
+    /// Largest message (encoded RFC 5322 bytes) the server accepts for submission, if this
+    /// backend submits mail itself and the server says. `None`: unknown or unlimited.
+    async fn send_limit(&self) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
     /// Send a fully built message (only when [`Self::handles_submission`]).
     /// The backend also files the copy in Sent.
     async fn submit(&self, _raw: &[u8], _from: &str, _recipients: &[String]) -> Result<()> {

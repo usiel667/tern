@@ -33,6 +33,10 @@ pub struct Ui {
     pub query: RefCell<String>,
     pub accounts: RefCell<Vec<AccountConfig>>,
     pub demo: bool,
+    /// Each account's message size limit, as its server reported it.
+    pub send_limits: RefCell<std::collections::HashMap<AccountId, u64>>,
+    /// The Unsent Messages dialog and its list, while open.
+    pub unsent: RefCell<Option<(adw::Dialog, gtk::ListBox)>>,
     reload_pending: Cell<bool>,
     sidebar_pending: Cell<bool>,
     busy: Cell<u32>,
@@ -144,6 +148,8 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         query: RefCell::new(String::new()),
         accounts: RefCell::new(accounts),
         demo,
+        send_limits: Default::default(),
+        unsent: RefCell::new(None),
         reload_pending: Cell::new(false),
         sidebar_pending: Cell::new(false),
         busy: Cell::new(0),
@@ -161,6 +167,15 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
 
     if !demo && ui.accounts.borrow().is_empty() {
         ui.list.show_welcome(true);
+    }
+    // Messages refused in an earlier session are still waiting for a decision.
+    match crate::outbox::count(&ui) {
+        0 => {}
+        n => ui.toast_review(&if n == 1 {
+            "A message couldn’t be sent".to_string()
+        } else {
+            format!("{n} messages couldn’t be sent")
+        }),
     }
     Some(ui)
 }
@@ -188,6 +203,17 @@ impl Ui {
     pub fn toast(&self, msg: &str) {
         let t = adw::Toast::new(msg);
         t.set_timeout(4);
+        self.toasts.add_toast(t);
+    }
+
+    /// A notice with a Review button that opens Unsent Messages.
+    pub fn toast_review(&self, msg: &str) {
+        let t = adw::Toast::builder()
+            .title(glib::markup_escape_text(msg))
+            .button_label("Review")
+            .action_name("win.unsent")
+            .timeout(10)
+            .build();
         self.toasts.add_toast(t);
     }
 
@@ -326,6 +352,18 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
             }
         }
         Event::Sent => ui.toast("Message sent"),
+        Event::SendLimit { account, bytes } => {
+            let mut limits = ui.send_limits.borrow_mut();
+            match bytes {
+                Some(n) => limits.insert(account, n),
+                None => limits.remove(&account),
+            };
+        }
+        Event::SendRejected { subject, reason, .. } => {
+            let subject = if subject.is_empty() { "your message".to_string() } else { format!("“{subject}”") };
+            ui.toast_review(&format!("Couldn’t send {subject}: {reason}"));
+        }
+        Event::OutboxChanged => crate::outbox::refresh(ui),
         Event::Error { account, message } => {
             let prefix = account
                 .and_then(|a| ui.account_for(a))
@@ -362,6 +400,7 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("next-message", Box::new(|ui| crate::message_list::step(ui, 1)));
     simple("previous-message", Box::new(|ui| crate::message_list::step(ui, -1)));
     simple("add-account", Box::new(accounts::open));
+    simple("unsent", Box::new(crate::outbox::open));
     simple("toggle-sidebar", Box::new(|ui| ui.outer.set_show_sidebar(!ui.outer.shows_sidebar())));
     simple("goto-inbox", Box::new(|ui| ui.sidebar.select_scope(ui, &ListScope::Role(MailboxRole::Inbox))));
     simple("about", Box::new(|ui| {

@@ -16,6 +16,10 @@ pub enum Error {
     Storage(String),
     #[error("configuration error: {0}")]
     Config(String),
+    /// The server refused this message permanently (too large, recipient refused, policy);
+    /// sending it again won't help.
+    #[error("{0}")]
+    Rejected(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

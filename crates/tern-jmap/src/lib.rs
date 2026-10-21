@@ -45,6 +45,8 @@ struct Session {
     download_url: String,
     upload_url: String,
     primary_accounts: Map<String, Value>,
+    #[serde(default)]
+    capabilities: Map<String, Value>,
 }
 
 pub struct JmapBackend {
@@ -149,7 +151,7 @@ impl JmapBackend {
     async fn upload(&self, raw: &[u8]) -> Result<String> {
         let (s, account) = self.session().await?;
         let url = s.upload_url.replace("{accountId}", account);
-        let v: Value = self
+        let resp = self
             .http
             .post(url)
             .bearer_auth(&self.token)
@@ -157,12 +159,15 @@ impl JmapBackend {
             .body(raw.to_vec())
             .send()
             .await
-            .map_err(net)?
-            .error_for_status()
-            .map_err(net)?
-            .json()
-            .await
             .map_err(net)?;
+        match resp.status() {
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE => {
+                return Err(Error::Rejected("the message is larger than the server accepts".into()));
+            }
+            reqwest::StatusCode::UNAUTHORIZED => return Err(Error::Auth("JMAP token rejected".into())),
+            _ => {}
+        }
+        let v: Value = resp.error_for_status().map_err(net)?.json().await.map_err(net)?;
         v["blobId"]
             .as_str()
             .map(str::to_owned)
@@ -461,7 +466,7 @@ impl MailBackend for JmapBackend {
             .to_string();
         let blob = self.upload(raw).await?;
         let rcpt: Vec<Value> = recipients.iter().map(|r| json!({ "email": r })).collect();
-        self.call(vec![
+        let responses = self.call(vec![
             ("Email/import", json!({
                 "accountId": account,
                 "emails": { "e": { "blobId": blob, "mailboxIds": { sent: true }, "keywords": { "$seen": true } } },
@@ -476,8 +481,41 @@ impl MailBackend for JmapBackend {
             })),
         ])
         .await?;
-        Ok(())
+        // A refused import or submission comes back as `notCreated`, not as a method error;
+        // without this check the message would count as sent and leave the outbox.
+        submission_result(&responses)
     }
+
+    async fn send_limit(&self) -> Result<Option<u64>> {
+        let (s, _) = self.session().await?;
+        Ok(upload_limit(&s.capabilities))
+    }
+}
+
+/// `maxSizeUpload` from the session's core capability: the largest blob, and so the largest
+/// message, the server accepts.
+fn upload_limit(capabilities: &Map<String, Value>) -> Option<u64> {
+    capabilities.get("urn:ietf:params:jmap:core")?["maxSizeUpload"].as_u64().filter(|&n| n > 0)
+}
+
+/// Turn `Email/import` + `EmailSubmission/set` responses into the send result.
+fn submission_result(responses: &[Value]) -> Result<()> {
+    for (r, key) in responses.iter().zip(["e", "s"]) {
+        if let Some(err) = r["notCreated"].get(key) {
+            let kind = err["type"].as_str().unwrap_or("error");
+            let why = err["description"].as_str().map(str::to_owned).unwrap_or_else(|| match kind {
+                "tooLarge" => "the message is larger than the server accepts".into(),
+                "tooManyRecipients" => "too many recipients".into(),
+                "noRecipients" => "no recipients".into(),
+                "invalidRecipients" => "some recipients aren't valid".into(),
+                "forbiddenFrom" | "forbiddenMailFrom" => "this account can't send from that address".into(),
+                "forbiddenToSend" => "this account isn't allowed to send mail".into(),
+                other => format!("the server refused the message ({other})"),
+            });
+            return Err(Error::Rejected(why));
+        }
+    }
+    Ok(())
 }
 
 /// Query for messages older than the cached ones: anchored just past the oldest
@@ -511,6 +549,34 @@ fn older_more(query: &Value) -> bool {
 mod tests {
     use super::*;
     use tern_core::model::FlagColor;
+
+    #[test]
+    fn upload_limit_from_session() {
+        let caps: Map<String, Value> = serde_json::from_value(json!({
+            "urn:ietf:params:jmap:core": { "maxSizeUpload": 50000000, "maxCallsInRequest": 32 },
+            "urn:ietf:params:jmap:mail": {}
+        }))
+        .unwrap();
+        assert_eq!(upload_limit(&caps), Some(50_000_000));
+        assert_eq!(upload_limit(&Map::new()), None);
+    }
+
+    #[test]
+    fn refused_submissions_are_errors() {
+        let ok = [json!({ "created": { "e": { "id": "M1" } } }), json!({ "created": { "s": { "id": "S1" } } })];
+        assert!(submission_result(&ok).is_ok());
+
+        let too_large = [json!({ "notCreated": { "e": { "type": "tooLarge" } } }), json!({})];
+        let Err(Error::Rejected(why)) = submission_result(&too_large) else { panic!("not rejected") };
+        assert!(why.contains("larger"), "{why}");
+
+        let refused = [
+            json!({ "created": { "e": { "id": "M1" } } }),
+            json!({ "notCreated": { "s": { "type": "forbiddenToSend", "description": "Sending suspended" } } }),
+        ];
+        let Err(Error::Rejected(why)) = submission_result(&refused) else { panic!("not rejected") };
+        assert_eq!(why, "Sending suspended", "the server's own description wins");
+    }
 
     #[test]
     fn parses_email_object() {

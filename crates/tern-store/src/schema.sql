@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS outbox (
     envelope   TEXT,              -- JSON {"from", "to"}: SMTP envelope incl. Bcc (v2+)
     created    INTEGER NOT NULL,
     attempts   INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT
+    last_error TEXT,
+    rejected   INTEGER NOT NULL DEFAULT 0  -- server refused it for good; not retried (v4+)
 );
 
 -- Local changes not yet pushed to the server (offline flag/move/delete).

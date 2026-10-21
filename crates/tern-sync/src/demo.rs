@@ -323,7 +323,16 @@ impl MailBackend for DemoBackend {
         true
     }
 
+    /// Small enough to try the size check with a couple of attachments.
+    async fn send_limit(&self) -> Result<Option<u64>> {
+        Ok(Some(DEMO_SEND_LIMIT))
+    }
+
     async fn submit(&self, raw: &[u8], _: &str, _: &[String]) -> Result<()> {
+        // A way to see a refused send in the demo: put "[reject]" in the subject.
+        if String::from_utf8_lossy(&raw[..raw.len().min(4096)]).contains("[reject]") {
+            return Err(tern_core::Error::Rejected("550 5.7.1 Message rejected by the demo server".into()));
+        }
         let split = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
         let env = tern_core::mime::envelope_from_parts(
             format!("s{}", raw.len()),
@@ -338,6 +347,9 @@ impl MailBackend for DemoBackend {
         Ok(())
     }
 }
+
+/// The demo server's message size limit (10 MB).
+pub const DEMO_SEND_LIMIT: u64 = 10 * 1024 * 1024;
 
 /// The demo account's config (fixed id so the UI can refer to it).
 pub fn demo_account() -> AccountConfig {

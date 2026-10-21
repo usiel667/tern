@@ -250,10 +250,17 @@ pub fn parse_uri_list(text: &str) -> Vec<String> {
 /// Many servers (Gmail included) reject messages larger than this.
 pub const LARGE_ATTACHMENTS: u64 = 25 * 1024 * 1024;
 
-/// True when adding attachments takes the total from at or under the limit to over it,
-/// so the warning shows once rather than on every file.
-pub fn crosses_size_limit(before: u64, after: u64) -> bool {
-    before <= LARGE_ATTACHMENTS && after > LARGE_ATTACHMENTS
+/// True when adding attachments takes a size from at or under `limit` to over it, so the
+/// warning shows once rather than on every file.
+pub fn crosses_limit(before: u64, after: u64, limit: u64) -> bool {
+    before <= limit && after > limit
+}
+
+/// Roughly how big a message with this much text and attachment data is once encoded:
+/// base64 makes attachments 4/3 larger plus a line break every 76 characters, and headers
+/// and MIME boundaries add a little. Only for warnings; the Send check measures exactly.
+pub fn estimated_message_size(text_bytes: u64, attachment_bytes: u64) -> u64 {
+    text_bytes + attachment_bytes * 4 / 3 * 78 / 76 + 4096
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -297,10 +304,19 @@ mod tests {
     #[test]
     fn size_warning_crosses_once() {
         let mb = 1024 * 1024;
-        assert!(!crosses_size_limit(0, 10 * mb));
-        assert!(crosses_size_limit(20 * mb, 26 * mb));
-        assert!(!crosses_size_limit(26 * mb, 30 * mb), "already over: don't warn again");
-        assert!(!crosses_size_limit(0, LARGE_ATTACHMENTS), "exactly at the limit is fine");
+        let l = LARGE_ATTACHMENTS;
+        assert!(!crosses_limit(0, 10 * mb, l));
+        assert!(crosses_limit(20 * mb, 26 * mb, l));
+        assert!(!crosses_limit(26 * mb, 30 * mb, l), "already over: don't warn again");
+        assert!(!crosses_limit(0, l, l), "exactly at the limit is fine");
+    }
+
+    #[test]
+    fn encoded_size_estimate_is_close() {
+        // 20 MB of attachments: iCloud (28,319,744) takes it, Gmail's 25 MB rule of thumb holds.
+        let est = estimated_message_size(1000, 20 * 1024 * 1024);
+        assert!(est > 28_000_000 && est < 29_000_000, "{est}");
+        assert!(estimated_message_size(1000, 25 * 1024 * 1024) < 35_882_577, "Gmail's advertised SIZE");
     }
 
     #[test]

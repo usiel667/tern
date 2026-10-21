@@ -16,6 +16,7 @@ glib-build-tools = "0.22"
 tern-core.workspace = true
 tern-store.workspace = true
 tern-sync.workspace = true
+tern-smtp.workspace = true
 tern-auth.workspace = true
 tern-imap.workspace = true
 gtk.workspace = true

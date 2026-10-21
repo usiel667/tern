@@ -122,6 +122,8 @@ Key decisions:
 | Save to Drafts / autosave | ⬜ | APPEND to Drafts |
 | Send later, Undo Send | ⬜ | outbox delay makes Undo Send easy |
 | Sent copy filed in Sent | ✅ | skipped for Gmail (server does it) |
+| Server size limits | ✅ | SMTP `SIZE` / JMAP `maxSizeUpload` per account; exact check on Send, estimate while attaching |
+| Refused sends (Unsent Messages) | ✅ | not retried; Edit / Try Again / Delete; JMAP `notCreated` no longer counts as sent |
 | mailto: handler | ✅ | in-message links, `tern mailto:…` (single instance), .desktop MimeType; RFC 6068 fields only, `attach` ignored |
 
 ### Settings
@@ -161,6 +163,10 @@ Key decisions:
      as text, chip sizes + 25 MB warning, Shift+Ctrl+A opens the picker (OpenSpec change
      `drag-drop-attachments`). Dropped folders are zipped in the background and attached as
      `Name.zip`; sending waits until compression finishes (`zip-dropped-folders`).
+   - ✅ Send size limits and refused sends: each account's real limit (Gmail 35,882,577,
+     iCloud 28,319,744 bytes encoded), checked on Send; server refusals stop retrying and go to
+     Unsent Messages (schema v4) (OpenSpec change `send-size-limits`).
+   - ⬜ Gmail app passwords (no Google verification needed).
    - ⬜ Save to Drafts / autosave.
    - ⬜ Undo Send (outbox delay).
    - ⬜ Signature editor.
@@ -176,12 +182,11 @@ Key decisions:
   sync, so loading a lot of older mail makes their syncs heavier.
 - "Nothing older" is remembered per session only; after a restart the first scroll to the end asks again.
 - Gmail shows labels as folders (as Apple Mail does over IMAP), so a message can appear in several.
-- Failed sends retry every 5 minutes with no limit, and there's no Outbox view to see or
-  cancel them (attempts and last error are recorded in the `outbox` table).
+- Sends that fail for temporary reasons (offline, server busy) retry every 5 minutes with no
+  limit and aren't listed anywhere; only messages a server *refused* show in Unsent Messages.
+- A server that only reveals its size limit after sign-in reports none to Tern; such
+  messages are still caught when the server refuses them.
 - Sends queued before schema v2 (milestone 1) still lose Bcc if resumed.
-- Over-size messages aren't caught before sending: there's only a 25 MB warning, the
-  server's real limit (SMTP `SIZE`, JMAP `maxSizeUpload`) isn't checked, and a send the
-  server rejects as too big would retry every 5 minutes like any other failed send.
 - Address suggestions can't be removed or edited, and Bcc recipients are only learned if
   they write back (they're not in the Sent copy).
 - The UI layer has no automated tests yet; `--demo` plus Xvfb screenshots is the current check.

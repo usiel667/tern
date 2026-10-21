@@ -12,6 +12,7 @@ lettre.workspace = true
 
 [dev-dependencies]
 mail-parser.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
