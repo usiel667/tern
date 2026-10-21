@@ -12,7 +12,13 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 - **Vim key bindings (Settings toggle)** — owner wants to move around the whole app with Vim
   keys once the core features are done: j/k through messages, h/l between sidebar / list /
   message, gg/G, / for search, and so on. Must never fire while typing in a text field.
-- **Themes (Settings)** — pick a theme in Preferences, not just follow the system.
+- **Themes (Settings)** — pick a theme in Preferences, not just follow the system. The usual
+  suspects: Tokyo Night (Night/Storm/Moon/Day), Catppuccin (Mocha/Macchiato/Frappé/Latte),
+  Rosé Pine (Main/Moon/Dawn), plus probably Gruvbox, Nord, Dracula, Everforest, Kanagawa.
+  Each maps its palette onto libadwaita's named colors (window, view, headerbar, sidebar,
+  accent, destructive, …) in one CSS file per theme, so new themes are easy to add; light
+  variants (Day, Latte, Dawn) switch Adwaita to light. The message viewer's own CSS and the
+  compose body follow the theme too.
 
 ## Ideas / maybe
 

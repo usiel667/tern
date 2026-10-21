@@ -132,7 +132,7 @@ Key decisions:
 | Preferences window | ⬜ | accounts list, signatures, fetch interval, remote content default, notification scope |
 | Remove account | 🟡 | engine supports it; no UI |
 | Vim key bindings (optional) | ⬜ | owner request 2026-10-21: toggle in Preferences; move around the whole app (j/k messages, h/l between panes, gg/G, / search, …) without breaking typing in text fields |
-| Themes | ⬜ | owner request 2026-10-21: choose a theme in Preferences (light/dark/system plus color themes) |
+| Themes | ⬜ | owner request 2026-10-21: Preferences picker — System/Light/Dark plus Tokyo Night (Night, Storm, Moon, Day), Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn); likely also Gruvbox, Nord, Dracula, Everforest, Kanagawa. Palettes are MIT-licensed (fine under GPL, keep attribution). Must also tint the message viewer and compose, not just the chrome |
 
 ## Milestones
 
