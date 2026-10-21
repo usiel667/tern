@@ -9,7 +9,10 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## To do
 
--
+- **Vim key bindings (Settings toggle)** — owner wants to move around the whole app with Vim
+  keys once the core features are done: j/k through messages, h/l between sidebar / list /
+  message, gg/G, / for search, and so on. Must never fire while typing in a text field.
+- **Themes (Settings)** — pick a theme in Preferences, not just follow the system.
 
 ## Ideas / maybe
 

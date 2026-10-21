@@ -131,6 +131,8 @@ Key decisions:
 |---|---|---|
 | Preferences window | ⬜ | accounts list, signatures, fetch interval, remote content default, notification scope |
 | Remove account | 🟡 | engine supports it; no UI |
+| Vim key bindings (optional) | ⬜ | owner request 2026-10-21: toggle in Preferences; move around the whole app (j/k messages, h/l between panes, gg/G, / search, …) without breaking typing in text fields |
+| Themes | ⬜ | owner request 2026-10-21: choose a theme in Preferences (light/dark/system plus color themes) |
 
 ## Milestones
 
@@ -173,7 +175,8 @@ Key decisions:
 4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
 5. **Reading polish:** full stacked conversation view, open-in-window, print, view source,
    RFC 8058 one-click unsubscribe, Quick Look via xdg-open.
-6. **Settings + packaging:** Preferences window, AUR package, Flatpak manifest.
+6. **Settings + packaging:** Preferences window (incl. optional Vim key bindings and themes),
+   AUR package, Flatpak manifest.
 
 ## Known gaps worth knowing now
 
