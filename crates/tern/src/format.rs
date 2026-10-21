@@ -238,6 +238,15 @@ pub fn mime_for(filename: &str) -> &'static str {
     }
 }
 
+/// Many servers (Gmail included) reject messages larger than this.
+pub const LARGE_ATTACHMENTS: u64 = 25 * 1024 * 1024;
+
+/// True when adding attachments takes the total from at or under the limit to over it,
+/// so the warning shows once rather than on every file.
+pub fn crosses_size_limit(before: u64, after: u64) -> bool {
+    before <= LARGE_ATTACHMENTS && after > LARGE_ATTACHMENTS
+}
+
 pub fn human_size(bytes: u64) -> String {
     match bytes {
         b if b < 1024 => format!("{b} bytes"),
@@ -265,6 +274,15 @@ mod tests {
         assert_eq!(list_date(at(Duration::days(3)), now), "Sunday");
         assert_eq!(list_date(at(Duration::days(30)), now), "Sep 14");
         assert_eq!(list_date(at(Duration::days(400)), now), "9/9/25");
+    }
+
+    #[test]
+    fn size_warning_crosses_once() {
+        let mb = 1024 * 1024;
+        assert!(!crosses_size_limit(0, 10 * mb));
+        assert!(crosses_size_limit(20 * mb, 26 * mb));
+        assert!(!crosses_size_limit(26 * mb, 30 * mb), "already over: don't warn again");
+        assert!(!crosses_size_limit(0, LARGE_ATTACHMENTS), "exactly at the limit is fine");
     }
 
     #[test]

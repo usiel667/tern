@@ -109,6 +109,21 @@
   box-shadow: none;
 }
 
+/* Files dragged over a New Message window. */
+.drop-hover {
+  outline: 2px dashed @accent_color;
+  outline-offset: -8px;
+  background: alpha(@accent_bg_color, 0.06);
+}
+
+.drop-hint {
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: @accent_bg_color;
+  color: @accent_fg_color;
+  font-weight: bold;
+}
+
 .compose-body {
   padding: 12px 16px;
   font-size: 1.05em;

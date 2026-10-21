@@ -3,8 +3,12 @@
 # Tern happens on its own seat and never moves focus away from what you're working in.
 #
 #   dev/test-display.sh start                 # nested Hyprland (state in target/test-display)
-#   dev/test-display.sh run [tern args…]      # (re)start `tern --demo [args]` inside it
+#   dev/test-display.sh run [--local-dialogs] [tern args…]
+#                                             # (re)start `tern --demo [args]` inside it;
+#                                             # --local-dialogs keeps file dialogs in the test
+#                                             # display (no portal), at the cost of desktop theming
 #   dev/test-display.sh keys TITLE KEY…       # focus window TITLE (Lua pattern) and press keys
+#   dev/test-display.sh type TITLE TEXT       # type TEXT (letters, digits, common punctuation)
 #   dev/test-display.sh shot FILE.png         # screenshot the whole nested display
 #   dev/test-display.sh stop
 #
@@ -13,7 +17,8 @@
 #
 # Needs Hyprland and grim. On the outer Hyprland, a window rule for class `aquamarine`
 # (the nested window) with `workspace = "8 silent"`, `no_initial_focus = true` and
-# `suppress_event = "activate activatefocus"` keeps the window from taking focus.
+# `suppress_event = "activate activatefocus"` keeps the window from taking focus, and
+# `render_unfocused = true` keeps it drawing while workspace 8 isn't on screen.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,6 +36,17 @@ inner() {
 for i in json.load(sys.stdin):
     if i['pid'] == $pid: print(i['instance'], i['wl_socket']); break
 else: sys.exit(1)"
+}
+
+# Stop the demo this script started and wait until it's gone, so a new one doesn't hand
+# its arguments to the old instance (GApplication is single-instance) and exit.
+stop_tern() {
+    alive tern || return 0
+    local pid
+    pid=$(cat "$DIR/tern.pid")
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 25); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.2; done
+    kill -9 "$pid" 2>/dev/null || true
 }
 
 # Sets SIG and SOCK, or stops with a hint.
@@ -62,11 +78,21 @@ LUA
         ;;
     run)
         shift
+        portals=""
+        if [[ "${1:-}" == --local-dialogs ]]; then portals="no-portals"; shift; fi
         need
-        if alive tern; then kill "$(cat "$DIR/tern.pid")"; sleep 1; fi
-        (cd "$ROOT" && env -u DISPLAY WAYLAND_DISPLAY="$SOCK" GDK_BACKEND=wayland \
-            nohup ./target/debug/tern --demo "$@" </dev/null >"$DIR/tern.log" 2>&1 & echo $! > "$DIR/tern.pid")
+        stop_tern
+        # A single background command, so $! is tern itself (env and nohup exec into it).
+        cd "$ROOT"
+        env -u DISPLAY WAYLAND_DISPLAY="$SOCK" GDK_BACKEND=wayland GDK_DEBUG="$portals" \
+            nohup ./target/debug/tern --demo "$@" </dev/null >"$DIR/tern.log" 2>&1 &
+        echo $! > "$DIR/tern.pid"
         sleep 3
+        if ! alive tern; then
+            # GApplication handed the arguments to a demo already running elsewhere and exited.
+            echo "tern exited at once: another 'tern --demo' is running (pgrep -a -x tern)" >&2
+            exit 1
+        fi
         echo "tern running (log: $DIR/tern.log)"
         ;;
     keys)
@@ -82,13 +108,38 @@ LUA
             sleep 0.15
         done
         ;;
+    type)
+        title="$2"; text="$3"
+        keys=()
+        for ((i = 0; i < ${#text}; i++)); do
+            ch="${text:i:1}"
+            case "$ch" in
+                [a-z0-9]) keys+=("$ch") ;;
+                [A-Z]) keys+=("SHIFT+${ch,,}") ;;
+                " ") keys+=(space) ;;
+                /) keys+=(slash) ;;
+                .) keys+=(period) ;;
+                ,) keys+=(comma) ;;
+                -) keys+=(minus) ;;
+                _) keys+=(SHIFT+minus) ;;
+                "~") keys+=(SHIFT+grave) ;;
+                @) keys+=(SHIFT+2) ;;
+                :) keys+=(SHIFT+semicolon) ;;
+                *) echo "can't type '$ch'" >&2; exit 1 ;;
+            esac
+        done
+        exec "$0" keys "$title" "${keys[@]}"
+        ;;
     shot)
         need
         sleep 0.4
-        WAYLAND_DISPLAY="$SOCK" grim "${2:?file}"
+        # The nested display only draws while its window is visible (or has the
+        # render_unfocused rule); don't hang forever if it isn't.
+        WAYLAND_DISPLAY="$SOCK" timeout 10 grim "${2:?file}" ||
+            { echo "screenshot timed out: is workspace 8 visible / render_unfocused set?" >&2; exit 1; }
         ;;
     stop)
-        if alive tern; then kill "$(cat "$DIR/tern.pid")" || true; fi
+        stop_tern
         if alive hyprland; then kill "$(cat "$DIR/hyprland.pid")"; else echo "not running"; fi
         rm -f "$DIR"/*.pid
         ;;

@@ -10,7 +10,7 @@ use tern_core::model::{AccountId, Address, Draft, MessageId, OutgoingAttachment}
 use tern_sync::{Command, FlagChange};
 
 use crate::app::Ui;
-use crate::format::{format_addresses, mime_for, parse_addresses};
+use crate::format::{crosses_size_limit, format_addresses, human_size, mime_for, parse_addresses, LARGE_ATTACHMENTS};
 
 pub fn open_new(ui: &Rc<Ui>) {
     open(ui, Draft::default(), None, None);
@@ -230,7 +230,10 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         .tooltip_text("Send (Ctrl+Return)")
         .css_classes(["suggested-action"])
         .build();
-    let attach = gtk::Button::builder().icon_name("mail-attachment-symbolic").tooltip_text("Attach Files…").build();
+    let attach = gtk::Button::builder()
+        .icon_name("mail-attachment-symbolic")
+        .tooltip_text("Attach Files… (Shift+Ctrl+A)")
+        .build();
     let bcc_toggle = gtk::ToggleButton::builder().label("Bcc").active(!draft.bcc.is_empty()).build();
     let header = adw::HeaderBar::new();
     header.pack_start(&send);
@@ -238,10 +241,23 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
     header.pack_end(&bcc_toggle);
     let title = if draft.subject.is_empty() { "New Message".to_string() } else { draft.subject.clone() };
 
+    // Shown while files are dragged over the window.
+    let drop_hint = gtk::Label::builder()
+        .label("Drop to attach")
+        .css_classes(["drop-hint"])
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::End)
+        .margin_bottom(24)
+        .can_target(false)
+        .visible(false)
+        .build();
+    let content_overlay = gtk::Overlay::builder().child(&content).build();
+    content_overlay.add_overlay(&drop_hint);
+
     let toasts = adw::ToastOverlay::new();
     let tv = adw::ToolbarView::new();
     tv.add_top_bar(&header);
-    tv.set_content(Some(&content));
+    tv.set_content(Some(&content_overlay));
     toasts.set_child(Some(&tv));
 
     let window = adw::Window::builder()
@@ -306,6 +322,46 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         attach.connect_clicked(move |_| pick_files(&c2));
     }
     {
+        // Capture phase: the body TextView has its own drop target for text, and file
+        // managers offer text too, so the window has to see a file drop first.
+        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        drop.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let hover = move |on: bool| {
+            if on {
+                content_overlay.add_css_class("drop-hover");
+            } else {
+                content_overlay.remove_css_class("drop-hover");
+            }
+            drop_hint.set_visible(on);
+        };
+        let hover = Rc::new(hover);
+        {
+            let hover = hover.clone();
+            drop.connect_enter(move |_, _, _| {
+                hover(true);
+                gdk::DragAction::COPY
+            });
+        }
+        {
+            let hover = hover.clone();
+            drop.connect_leave(move |_| hover(false));
+        }
+        let c2 = c.clone();
+        drop.connect_drop(move |_, value, _, _| {
+            hover(false);
+            let Ok(list) = value.get::<gdk::FileList>() else { return false };
+            let (local, links): (Vec<gio::File>, Vec<gio::File>) =
+                list.files().into_iter().partition(|f| f.is_native());
+            // A link dragged from a browser is text for the body, not something to download.
+            for link in links {
+                c2.body.buffer().insert_at_cursor(&format!("{} ", link.uri()));
+            }
+            add_files(&c2, local);
+            true
+        });
+        c.window.add_controller(drop);
+    }
+    {
         let c2 = c.clone();
         c.subject.connect_changed(move |e| {
             let t = e.text();
@@ -321,6 +377,7 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
                 do_send(&ui2, &c2);
                 return glib::Propagation::Stop;
             }
+
             if key == gdk::Key::Escape {
                 c2.window.close();
                 return glib::Propagation::Stop;
@@ -329,6 +386,23 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         });
     }
     c.window.add_controller(keys);
+    // Shift+Ctrl+A attaches (Apple Mail's ⇧⌘A). Capture phase: text fields bind it to
+    // "unselect all" and would swallow it before the window's bubble-phase handler.
+    let attach_key = gtk::EventControllerKey::new();
+    attach_key.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let c2 = c.clone();
+        attach_key.connect_key_pressed(move |_, key, _, mods| {
+            if matches!(key, gdk::Key::A | gdk::Key::a)
+                && mods.contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
+            {
+                pick_files(&c2);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    c.window.add_controller(attach_key);
     {
         let c2 = c.clone();
         c.window.connect_close_request(move |w| {
@@ -367,9 +441,20 @@ fn refresh_attachments(c: &Rc<Compose>) {
     }
     for (i, a) in c.attachments.borrow().iter().enumerate() {
         let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        chip.add_css_class("attachment-chip");
         chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
         chip.append(&gtk::Label::new(Some(&a.filename)));
-        let remove = gtk::Button::builder().icon_name("window-close-symbolic").css_classes(["flat", "circular"]).build();
+        chip.append(
+            &gtk::Label::builder()
+                .label(human_size(a.data.len() as u64))
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+        let remove = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Remove")
+            .css_classes(["flat", "circular"])
+            .build();
         let c2 = c.clone();
         remove.connect_clicked(move |_| {
             c2.attachments.borrow_mut().remove(i);
@@ -386,22 +471,48 @@ fn pick_files(c: &Rc<Compose>) {
     let c2 = c.clone();
     dialog.open_multiple(Some(&c.window), gio::Cancellable::NONE, move |res| {
         let Ok(files) = res else { return };
-        for i in 0..files.n_items() {
-            let Some(file) = files.item(i).and_downcast::<gio::File>() else { continue };
-            let Some(path) = file.path() else { continue };
-            match std::fs::read(&path) {
-                Ok(data) => {
-                    let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    c2.attachments.borrow_mut().push(OutgoingAttachment {
-                        mime_type: mime_for(&filename).into(),
-                        filename,
-                        data,
+        let files = (0..files.n_items()).filter_map(|i| files.item(i).and_downcast::<gio::File>()).collect();
+        add_files(&c2, files);
+    });
+}
+
+/// Read files in the background (no freeze on big ones) and attach them. Folders are
+/// skipped; a file that can't be read gets its own notice.
+fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
+    if files.is_empty() {
+        return;
+    }
+    let c = c.clone();
+    glib::spawn_future_local(async move {
+        let total = |c: &Compose| c.attachments.borrow().iter().map(|a| a.data.len() as u64).sum::<u64>();
+        let before = total(&c);
+        for file in files {
+            let name = file
+                .basename()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "attachment".into());
+            if file.query_file_type(gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) == gio::FileType::Directory {
+                c.toasts.add_toast(adw::Toast::new(&format!("“{name}” is a folder; folders can’t be attached")));
+                continue;
+            }
+            match file.load_contents_future().await {
+                Ok((data, _)) => {
+                    c.attachments.borrow_mut().push(OutgoingAttachment {
+                        mime_type: mime_for(&name).into(),
+                        filename: name,
+                        data: data.to_vec(),
                     });
+                    refresh_attachments(&c);
                 }
-                Err(e) => c2.toasts.add_toast(adw::Toast::new(&format!("Couldn’t read {}: {e}", path.display()))),
+                Err(e) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t read “{name}”: {e}"))),
             }
         }
-        refresh_attachments(&c2);
+        if crosses_size_limit(before, total(&c)) {
+            c.toasts.add_toast(adw::Toast::new(&format!(
+                "Attachments are over {} — many mail servers reject messages that large",
+                human_size(LARGE_ATTACHMENTS)
+            )));
+        }
     });
 }
 

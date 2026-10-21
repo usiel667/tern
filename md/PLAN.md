@@ -115,7 +115,7 @@ Key decisions:
 | From account picker | ✅ | |
 | Cc / Bcc | ✅ | Bcc kept out of headers |
 | Attachments (pick) | ✅ | forward carries originals |
-| Attachments (drag & drop into window) | ⬜ | |
+| Attachments (drag & drop into window) | ✅ | anywhere on the window incl. body; folders skipped, links become text; sizes on chips, 25 MB warning; Shift+Ctrl+A picker |
 | Signatures | 🟡 | per-account plain text in accounts.toml; no editor yet |
 | Address autocomplete from history/contacts | ✅ | from cached mail (`contacts` table, schema v3); people you wrote to rank first; no system address book yet |
 | Rich text (bold, lists, fonts) | ⬜ | likely a WebKit contenteditable editor |
@@ -156,7 +156,10 @@ Key decisions:
    - ✅ Address autocomplete: the engine learns addresses as mail is stored (Sent → To/Cc,
      elsewhere → From; Drafts/Junk/Trash and noreply-style senders ignored), schema v3
      backfills cached mail; To/Cc/Bcc show up to 8 suggestions (OpenSpec change `address-autocomplete`).
-   - ⬜ Drag-and-drop attachments.
+   - ✅ Drag-and-drop attachments: capture-phase drop target on the compose window (beats the
+     body's text drop), files read async (picker too), folders skipped, browser links inserted
+     as text, chip sizes + 25 MB warning, Shift+Ctrl+A opens the picker (OpenSpec change
+     `drag-drop-attachments`).
    - ⬜ Save to Drafts / autosave.
    - ⬜ Undo Send (outbox delay).
    - ⬜ Signature editor.

@@ -10,7 +10,8 @@ RUST_LOG=tern_sync=debug,tern_imap=debug cargo run   # verbose sync logging
 cargo run -- --demo                                  # fake account, no network/keyring
 grim -g "X,Y WxH" shot.png                           # screenshot a window (geometry from hyprctl clients -j)
 dev/test-display.sh start                            # private nested Hyprland for UI tests (never steals focus)
-dev/test-display.sh run 'mailto:?subject=x'          # tern --demo inside it
+dev/test-display.sh run 'mailto:?subject=x'          # tern --demo inside it (--local-dialogs: file dialogs stay inside)
+dev/test-display.sh type 'x' 'hello'                 # type text into window titled x
 dev/test-display.sh keys 'x' c h Down Return         # focus a window in it by title and press keys
 dev/test-display.sh shot shot.png                    # screenshot the test display
 dev/test-imap-server.sh start                        # local Dovecot for live tests (target/dovecot)
