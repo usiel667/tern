@@ -28,6 +28,9 @@ struct Fake {
     refuse_submit: Mutex<bool>,
     /// What `send_limit` reports.
     limit: Mutex<Option<u64>>,
+    /// Make `append` not report the new message's id (like IMAP without a usable search).
+    append_without_id: Mutex<bool>,
+    next_uid: Mutex<u32>,
 }
 
 fn env(uid: u32, subject: &str, seen: bool) -> Envelope {
@@ -65,7 +68,12 @@ impl MailBackend for Fake {
             role,
             selectable: true,
         };
-        Ok(vec![mb("INBOX", MailboxRole::Inbox), mb("Trash", MailboxRole::Trash), mb("Sent", MailboxRole::Sent)])
+        Ok(vec![
+            mb("INBOX", MailboxRole::Inbox),
+            mb("Trash", MailboxRole::Trash),
+            mb("Sent", MailboxRole::Sent),
+            mb("Drafts", MailboxRole::Drafts),
+        ])
     }
     async fn sync_mailbox(&self, mailbox: &str, since: Option<&SyncState>, _: Option<u32>) -> Result<MailboxDelta> {
         let all = self.boxes.lock().unwrap().get(mailbox).cloned().unwrap_or_default();
@@ -131,13 +139,25 @@ impl MailBackend for Fake {
         boxes.entry(to.into()).or_default().extend(moved);
         Ok(vec![])
     }
-    async fn append(&self, mb: &str, _: &[u8], _: &Flags) -> Result<Option<String>> {
+    async fn append(&self, mb: &str, raw: &[u8], flags: &Flags) -> Result<Option<String>> {
+        self.check_online()?;
         self.log.lock().unwrap().push(format!("append {mb}"));
-        Ok(None)
+        let uid = {
+            let mut n = self.next_uid.lock().unwrap();
+            *n = (*n).max(1000) + 1;
+            *n
+        };
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let env = tern_core::mime::envelope_from_parts(uid.to_string(), &raw[..split], None, flags.clone(), raw.len() as u32, None);
+        self.boxes.lock().unwrap().entry(mb.into()).or_default().push(env);
+        Ok((!*self.append_without_id.lock().unwrap()).then(|| uid.to_string()))
     }
     async fn expunge(&self, mb: &str) -> Result<()> {
         self.check_online()?;
         self.log.lock().unwrap().push(format!("expunge {mb}"));
+        if let Some(v) = self.boxes.lock().unwrap().get_mut(mb) {
+            v.retain(|e| !e.flags.deleted);
+        }
         Ok(())
     }
     async fn wait_for_push(&self, _: &str, _: Duration) -> Result<Option<PushEvent>> {
@@ -203,7 +223,7 @@ fn inbox(e: &Engine, id: AccountId) -> MailboxId {
 async fn initial_sync_fills_store() {
     let (engine, _, rx, id) = setup().await;
     let boxes = engine.store().mailboxes(Some(id)).unwrap();
-    assert_eq!(boxes.len(), 3);
+    assert_eq!(boxes.len(), 4);
     assert_eq!(boxes[0].unread, 1);
     let rows = engine.store().list(&ListScope::Role(MailboxRole::Inbox), true, 50).unwrap();
     assert_eq!(rows.len(), 2);
@@ -266,7 +286,7 @@ async fn send_reply_submits_and_marks_answered() {
     engine.handle(Command::Send {
         account: id,
         draft: Box::new(draft),
-        responding_to: Some((orig.id, FlagChange::Answered)),
+        draft_key: None, responding_to: Some((orig.id, FlagChange::Answered)),
     });
     engine.settle().await;
     assert!(fake.log.lock().unwrap().iter().any(|l| l.contains("submit tom@x.com") && l.contains("ann@x.com")));
@@ -307,7 +327,7 @@ fn submits(fake: &Fake) -> Vec<String> {
 async fn offline_send_keeps_bcc_when_retried() {
     let (mut engine, fake, _rx, id) = setup().await;
     *fake.offline.lock().unwrap() = true;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
     engine.settle().await;
     let queued = engine.store().outbox().unwrap();
     assert_eq!(queued.len(), 1, "failed send stays queued");
@@ -325,7 +345,7 @@ async fn offline_send_keeps_bcc_when_retried() {
 #[tokio::test]
 async fn flush_during_send_does_not_send_twice() {
     let (mut engine, fake, _rx, id) = setup().await;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
     // The periodic flush fires while the send is still in flight.
     engine.flush_outbox();
     engine.settle().await;
@@ -740,7 +760,7 @@ async fn refused_send_is_kept_and_not_retried() {
     *fake.refuse_submit.lock().unwrap() = true;
     let mut draft = draft_with_bcc();
     draft.subject = "Big report".into();
-    engine.handle(Command::Send { account: id, draft: Box::new(draft), responding_to: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft), responding_to: None, draft_key: None });
     engine.settle().await;
 
     assert!(engine.store().outbox().unwrap().is_empty(), "no longer queued");
@@ -772,7 +792,7 @@ async fn refused_send_is_kept_and_not_retried() {
 async fn refused_send_can_be_discarded() {
     let (mut engine, fake, _rx, id) = setup().await;
     *fake.refuse_submit.lock().unwrap() = true;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
     engine.settle().await;
     let refused = engine.store().outbox_rejected().unwrap();
     engine.handle(Command::DiscardSend(refused[0].id));
@@ -790,7 +810,7 @@ async fn over_the_limit_is_refused_without_uploading() {
         events(&rx).iter().any(|e| matches!(e, Event::SendLimit { bytes: Some(100), .. })),
         "the UI hears about the limit"
     );
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
     engine.settle().await;
     assert!(submits(&fake).is_empty(), "never sent to the server");
     let refused = engine.store().outbox_rejected().unwrap();
@@ -801,8 +821,132 @@ async fn over_the_limit_is_refused_without_uploading() {
 async fn network_failure_still_retries() {
     let (mut engine, fake, _rx, id) = setup().await;
     *fake.offline.lock().unwrap() = true;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
     engine.settle().await;
     assert_eq!(engine.store().outbox().unwrap().len(), 1, "still queued");
     assert!(engine.store().outbox_rejected().unwrap().is_empty());
+}
+
+fn draft(subject: &str) -> Box<Draft> {
+    Box::new(Draft {
+        to: vec![Address::new(None, "ann@x.com")],
+        bcc: vec![Address::new(None, "boss@x.com")],
+        subject: subject.into(),
+        text: "half-written".into(),
+        ..Default::default()
+    })
+}
+
+fn server_drafts(fake: &Fake) -> Vec<String> {
+    fake.boxes.lock().unwrap().get("Drafts").map(|v| v.iter().map(|e| e.subject.clone()).collect()).unwrap_or_default()
+}
+
+fn cached_drafts(e: &Engine, id: AccountId) -> Vec<String> {
+    let mb = e.store().mailbox_by_role(id, MailboxRole::Drafts).unwrap().unwrap().id;
+    e.store().list(&tern_store::ListScope::Mailbox(mb), false, 50).unwrap().into_iter().map(|m| m.envelope.subject).collect()
+}
+
+#[tokio::test]
+async fn autosave_keeps_one_server_copy_per_draft() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    let save = |subject: &str| Command::SaveDraft { key: "k1".into(), account: id, draft: draft(subject) };
+    engine.handle(save("Plan v1"));
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake), ["Plan v1"]);
+    assert_eq!(cached_drafts(&engine, id), ["Plan v1"], "shows up in the Drafts mailbox");
+
+    engine.handle(save("Plan v2"));
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake), ["Plan v2"], "the old copy is replaced, not duplicated");
+    assert_eq!(cached_drafts(&engine, id), ["Plan v2"]);
+    let row = engine.store().draft("k1").unwrap().unwrap();
+    assert!(row.uploaded);
+    let back = tern_core::mime::draft_from_raw(&row.raw, &[]).unwrap();
+    assert_eq!(back.bcc[0].email, "boss@x.com", "drafts keep Bcc");
+}
+
+#[tokio::test]
+async fn sending_or_discarding_removes_the_draft() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    engine.handle(Command::SaveDraft { key: "a".into(), account: id, draft: draft("To send") });
+    engine.handle(Command::SaveDraft { key: "b".into(), account: id, draft: draft("To drop") });
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake).len(), 2);
+
+    engine.handle(Command::Send { account: id, draft: draft("To send"), responding_to: None, draft_key: Some("a".into()) });
+    engine.handle(Command::DiscardDraft("b".into()));
+    engine.settle().await;
+    assert!(server_drafts(&fake).is_empty(), "{:?}", server_drafts(&fake));
+    assert!(engine.store().draft("a").unwrap().is_none() && engine.store().draft("b").unwrap().is_none());
+    assert_eq!(submits(&fake).len(), 1, "the message itself was sent");
+}
+
+#[tokio::test]
+async fn offline_drafts_wait_and_upload_later() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.offline.lock().unwrap() = true;
+    engine.handle(Command::SaveDraft { key: "k".into(), account: id, draft: draft("On the train") });
+    engine.settle().await;
+    assert!(server_drafts(&fake).is_empty());
+    assert_eq!(engine.store().drafts_pending().unwrap().len(), 1, "kept on this computer");
+
+    *fake.offline.lock().unwrap() = false;
+    engine.flush_outbox();
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake), ["On the train"]);
+    assert!(engine.store().drafts_pending().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn editing_a_server_draft_replaces_it() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    // A draft written on the phone.
+    fake.boxes.lock().unwrap().entry("Drafts".into()).or_default().push(env(9, "From the phone", true));
+    let drafts_mb = engine.store().mailbox_by_role(id, MailboxRole::Drafts).unwrap().unwrap().id;
+    engine.handle(Command::SyncMailbox(drafts_mb));
+    engine.settle().await;
+    let phone = engine.store().list(&tern_store::ListScope::Mailbox(drafts_mb), false, 5).unwrap()[0].id;
+
+    engine.handle(Command::AdoptDraft { key: "k".into(), account: id, message: phone });
+    engine.handle(Command::SaveDraft { key: "k".into(), account: id, draft: draft("Edited here") });
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake), ["Edited here"], "the phone's copy was replaced");
+
+    // Opening another phone draft and sending it without changes removes it too.
+    fake.boxes.lock().unwrap().entry("Drafts".into()).or_default().push(env(10, "Send as is", true));
+    engine.handle(Command::SyncMailbox(drafts_mb));
+    engine.settle().await;
+    let list = engine.store().list(&tern_store::ListScope::Mailbox(drafts_mb), false, 5).unwrap();
+    let as_is = list.iter().find(|m| m.envelope.subject == "Send as is").unwrap().id;
+    engine.handle(Command::AdoptDraft { key: "k2".into(), account: id, message: as_is });
+    engine.handle(Command::Send { account: id, draft: draft("Send as is"), responding_to: None, draft_key: Some("k2".into()) });
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake), ["Edited here"]);
+}
+
+#[tokio::test]
+async fn old_copy_found_by_message_id_when_append_reports_no_id() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    *fake.append_without_id.lock().unwrap() = true;
+    let save = |subject: &str| Command::SaveDraft { key: "k".into(), account: id, draft: draft(subject) };
+    engine.handle(save("v1"));
+    engine.settle().await;
+    engine.handle(save("v2"));
+    engine.settle().await;
+    assert_eq!(server_drafts(&fake), ["v2"]);
+}
+
+#[tokio::test]
+async fn reopening_a_saved_draft_leaves_no_stale_entry() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    engine.handle(Command::SaveDraft { key: "first".into(), account: id, draft: draft("Plan") });
+    engine.settle().await;
+    let drafts_mb = engine.store().mailbox_by_role(id, MailboxRole::Drafts).unwrap().unwrap().id;
+    let msg = engine.store().list(&tern_store::ListScope::Mailbox(drafts_mb), false, 5).unwrap()[0].id;
+
+    engine.handle(Command::AdoptDraft { key: "second".into(), account: id, message: msg });
+    engine.handle(Command::SaveDraft { key: "second".into(), account: id, draft: draft("Plan, edited") });
+    engine.settle().await;
+    assert!(engine.store().draft("first").unwrap().is_none(), "the closed window's entry is gone");
+    assert_eq!(server_drafts(&fake), ["Plan, edited"]);
 }

@@ -547,9 +547,18 @@ impl MailBackend for ImapBackend {
 
     async fn append(&self, mailbox: &str, raw: &[u8], flags: &Flags) -> Result<Option<String>> {
         let f = format!("({})", flags.to_imap().join(" "));
+        let message_id = header_message_id(raw);
         self.with_session(async |s| {
             s.append(mailbox, Some(&f), None, raw).await.map_err(cmd)?;
-            Ok(None)
+            // async-imap doesn't expose APPENDUID, so find the new message by its
+            // Message-ID (callers that need the id, like drafts, give each version its own).
+            let Some(id) = &message_id else { return Ok(None) };
+            s.select(mailbox).await.map_err(cmd)?;
+            let found = s
+                .uid_search(format!("HEADER Message-ID {}", imap_quote(id)))
+                .await
+                .map_err(cmd)?;
+            Ok(found.into_iter().max().map(|uid| uid.to_string()))
         })
         .await
     }
@@ -592,9 +601,44 @@ impl MailBackend for ImapBackend {
     }
 }
 
+/// The Message-ID header value (with angle brackets) of a raw message, if it has one.
+fn header_message_id(raw: &[u8]) -> Option<String> {
+    let end = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(raw.len().min(16 * 1024));
+    let head = String::from_utf8_lossy(&raw[..end]);
+    let mut lines = head.split("\r\n").peekable();
+    while let Some(line) = lines.next() {
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("message-id")
+        {
+            // A long id may be folded onto the next line.
+            let mut v = value.trim().to_string();
+            while lines.peek().is_some_and(|l| l.starts_with([' ', '\t'])) {
+                v.push_str(lines.next().unwrap_or_default().trim());
+            }
+            return Some(v).filter(|v| !v.is_empty());
+        }
+    }
+    None
+}
+
+/// An IMAP quoted string.
+fn imap_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_message_id_header() {
+        let raw = b"From: a@x\r\nMessage-ID: <v2.abc@tern>\r\nSubject: Hi\r\n\r\nbody";
+        assert_eq!(header_message_id(raw).as_deref(), Some("<v2.abc@tern>"));
+        let folded = b"message-id:\r\n <long.id@host>\r\n\r\n";
+        assert_eq!(header_message_id(folded).as_deref(), Some("<long.id@host>"));
+        assert_eq!(header_message_id(b"Subject: none\r\n\r\nx"), None);
+        assert_eq!(imap_quote("<a\"b@x>"), "\"<a\\\"b@x>\"");
+    }
 
     #[test]
     fn roles_from_attributes_and_names() {

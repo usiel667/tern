@@ -32,6 +32,10 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
+- **2026-10-21 — Drafts:** autosave (no indicator, like Apple Mail); Ctrl+S shows "Saved to
+  Drafts". Closing asks "Save this message as a draft?" with Save (default) / Cancel /
+  Don't Save (red). Messages in a Drafts mailbox show a "This message is a draft." banner
+  with **Edit Draft**; Return or double-click in the list also opens them.
 - **2026-10-21 — Size limits and Unsent Messages:** attaching warns against the account's
   real limit; Send shows a "Message Too Large" dialog (size vs. what the server accepts) and
   keeps the window open. A refused send shows a toast with **Review**; Main Menu → Unsent

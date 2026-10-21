@@ -19,6 +19,8 @@ pub struct DemoBackend {
     /// Messages moved or sent after startup. A real server gives these new UIDs
     /// above the cached window, so they're always inside it whatever their date.
     arrived: Mutex<std::collections::HashSet<String>>,
+    /// Counter for ids of appended messages (drafts).
+    appended: Mutex<u32>,
 }
 
 fn addr(name: &str, email: &str) -> Address {
@@ -147,7 +149,7 @@ impl DemoBackend {
             };
             inbox.push((env, raw.into_bytes()));
         }
-        Self { boxes: Mutex::new(boxes), arrived: Default::default() }
+        Self { boxes: Mutex::new(boxes), arrived: Default::default(), appended: Default::default() }
     }
 }
 
@@ -302,8 +304,18 @@ impl MailBackend for DemoBackend {
         Ok(rids.to_vec())
     }
 
-    async fn append(&self, _: &str, _: &[u8], _: &Flags) -> Result<Option<String>> {
-        Ok(None)
+    async fn append(&self, mailbox: &str, raw: &[u8], flags: &Flags) -> Result<Option<String>> {
+        // Keep it, like a server would, so drafts can be tried in the demo.
+        let id = {
+            let mut n = self.appended.lock().unwrap();
+            *n += 1;
+            format!("a{}", *n)
+        };
+        let split = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let env = tern_core::mime::envelope_from_parts(id.clone(), &raw[..split], Some(&raw[split..]), flags.clone(), raw.len() as u32, None);
+        self.arrived.lock().unwrap().insert(id.clone());
+        self.boxes.lock().unwrap().entry(mailbox.into()).or_default().push((env, raw.to_vec()));
+        Ok(Some(id))
     }
 
     async fn expunge(&self, mailbox: &str) -> Result<()> {

@@ -119,7 +119,7 @@ Key decisions:
 | Signatures | 🟡 | per-account plain text in accounts.toml; no editor yet |
 | Address autocomplete from history/contacts | ✅ | from cached mail (`contacts` table, schema v3); people you wrote to rank first; no system address book yet |
 | Rich text (bold, lists, fonts) | ⬜ | likely a WebKit contenteditable editor |
-| Save to Drafts / autosave | ⬜ | APPEND to Drafts |
+| Save to Drafts / autosave | ✅ | local first (schema v5), then APPEND to Drafts replacing the previous copy; 4 s pause / 30 s while typing, Ctrl+S; close asks Save / Don't Save / Cancel; Edit Draft banner + Return/double-click; Bcc kept |
 | Send later, Undo Send | ⬜ | outbox delay makes Undo Send easy |
 | Sent copy filed in Sent | ✅ | skipped for Gmail (server does it) |
 | Server size limits | ✅ | SMTP `SIZE` / JMAP `maxSizeUpload` per account; exact check on Send, estimate while attaching |
@@ -171,7 +171,10 @@ Key decisions:
    - ✅ Gmail app passwords: Add Account → Google asks for an app password (spaces removed);
      browser sign-in is offered only when an OAuth client is configured; a refused password
      explains app passwords (OpenSpec change `gmail-app-passwords`).
-   - ⬜ Save to Drafts / autosave.
+   - ✅ Save to Drafts / autosave: drafts are saved on this computer first, then uploaded to
+     the account's Drafts mailbox replacing the previous copy (IMAP finds the new UID by
+     Message-ID); sending or Don't Save removes them; drafts from other apps open for editing
+     (OpenSpec change `drafts-autosave`).
    - ⬜ Undo Send (outbox delay).
    - ⬜ Signature editor.
 4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
@@ -192,6 +195,9 @@ Key decisions:
 - A server that only reveals its size limit after sign-in reports none to Tern; such
   messages are still caught when the server refuses them.
 - Sends queued before schema v2 (milestone 1) still lose Bcc if resumed.
+- Each autosave re-uploads the whole draft, attachments included; drafts with big
+  attachments use bandwidth every 30 s while you type.
+- Accounts without a Drafts mailbox keep drafts on this computer only, with no list of them.
 - Address suggestions can't be removed or edited, and Bcc recipients are only learned if
   they write back (they're not in the Sent copy).
 - The UI layer has no automated tests yet; `--demo` plus Xvfb screenshots is the current check.

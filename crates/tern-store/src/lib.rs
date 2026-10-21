@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub struct Store {
     conn: Connection,
@@ -694,6 +694,104 @@ impl Store {
         Ok(())
     }
 
+    // ------------------------------------------------------------------- drafts
+
+    /// Save a new version of a draft (creating it if needed). It's marked not uploaded.
+    pub fn draft_put(&mut self, key: &str, account: AccountId, raw: &[u8], message_id: Option<&str>) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO drafts (key, account, raw, message_id) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (key) DO UPDATE SET raw = excluded.raw, message_id = excluded.message_id,
+                    account = excluded.account, version = version + 1, uploaded = 0",
+                params![key, account.to_string(), raw, message_id],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    pub fn draft(&self, key: &str) -> Result<Option<DraftRow>> {
+        Ok(self.drafts_where("key = ?1", [key])?.into_iter().next())
+    }
+
+    /// Drafts whose latest version isn't on the server yet.
+    pub fn drafts_pending(&self) -> Result<Vec<DraftRow>> {
+        self.drafts_where("uploaded = 0", [])
+    }
+
+    fn drafts_where<P: rusqlite::Params>(&self, filter: &str, args: P) -> Result<Vec<DraftRow>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT key, account, raw, message_id, version, uploaded, remote_mailbox, remote_id, remote_msgid
+                 FROM drafts WHERE {filter} ORDER BY rowid"
+            ))
+            .map_err(db)?;
+        stmt.query_map(args, |r| {
+            Ok(DraftRow {
+                key: r.get(0)?,
+                account: parse_account(&r.get::<_, String>(1)?),
+                raw: r.get(2)?,
+                message_id: r.get(3)?,
+                version: r.get(4)?,
+                uploaded: r.get(5)?,
+                remote: match r.get::<_, Option<i64>>(6)? {
+                    Some(m) => Some(ServerCopy {
+                        mailbox: MailboxId(m),
+                        remote_id: r.get(7)?,
+                        message_id: r.get(8)?,
+                    }),
+                    None => None,
+                },
+            })
+        })
+        .map_err(db)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db)
+    }
+
+    /// Record where the draft's server copy now is. `version` is the version that was
+    /// uploaded: if the draft changed meanwhile, it stays marked not uploaded.
+    pub fn draft_uploaded(&mut self, key: &str, copy: &ServerCopy, version: i64) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE drafts SET remote_mailbox = ?2, remote_id = ?3, remote_msgid = ?4, uploaded = (version = ?5)
+                 WHERE key = ?1",
+                params![key, copy.mailbox.0, copy.remote_id, copy.message_id, version],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    /// Forget other drafts whose server copy is `copy` and that have nothing newer to
+    /// upload (a window closed after saving, now reopened under a new key).
+    pub fn draft_forget_others(&mut self, key: &str, copy: &ServerCopy) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM drafts WHERE key <> ?1 AND uploaded = 1 AND remote_mailbox = ?2
+                   AND (remote_id = ?3 OR (remote_id IS NULL AND remote_msgid = ?4))",
+                params![key, copy.mailbox.0, copy.remote_id, copy.message_id],
+            )
+            .map_err(db)?;
+        Ok(())
+    }
+
+    pub fn draft_delete(&mut self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM drafts WHERE key = ?1", [key]).map_err(db)?;
+        Ok(())
+    }
+
+    /// A cached message in `mailbox` with this Message-ID, as `(id, remote id)`.
+    pub fn find_by_message_id(&self, mailbox: MailboxId, message_id: &str) -> Result<Option<(MessageId, String)>> {
+        self.conn
+            .query_row(
+                "SELECT id, remote_id FROM messages WHERE mailbox = ?1 AND message_id = ?2 ORDER BY id DESC LIMIT 1",
+                params![mailbox.0, message_id],
+                |r| Ok((MessageId(r.get(0)?), r.get(1)?)),
+            )
+            .optional()
+            .map_err(db)
+    }
+
     // ----------------------------------------------------------------- contacts
 
     /// Addresses whose email, or any word of whose name, starts with `prefix`; people the
@@ -735,6 +833,7 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 4 {
         add_column(conn, "outbox", "rejected", "INTEGER NOT NULL DEFAULT 0")?;
     }
+    // v5 only adds the `drafts` table, which SCHEMA creates.
     Ok(())
 }
 
@@ -828,6 +927,29 @@ fn is_machine_address(email: &str) -> bool {
         || local.starts_with("bounce")
         || local.starts_with("noreply")
         || local.starts_with("no-reply")
+}
+
+/// A message being written, as last saved.
+#[derive(Debug, Clone)]
+pub struct DraftRow {
+    pub key: String,
+    pub account: AccountId,
+    pub raw: Vec<u8>,
+    pub message_id: Option<String>,
+    pub version: i64,
+    /// The server copy is the latest version.
+    pub uploaded: bool,
+    /// Where the server copy is, if there is one.
+    pub remote: Option<ServerCopy>,
+}
+
+/// A draft's copy in a Drafts mailbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCopy {
+    pub mailbox: MailboxId,
+    /// Known when the server reported it (JMAP, or IMAP after a Message-ID search).
+    pub remote_id: Option<String>,
+    pub message_id: Option<String>,
 }
 
 /// A queued send.

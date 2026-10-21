@@ -118,10 +118,11 @@ async fn full_cycle() {
     assert!(!body.raw.is_empty());
 
     // New mail arrives → picked up incrementally.
-    b.append(&inbox, &message(4, "Live 4"), &Flags::default()).await.unwrap();
+    let appended = b.append(&inbox, &message(4, "Live 4"), &Flags::default()).await.unwrap();
     let d4 = b.sync_mailbox(&inbox, Some(&d3.new_state), None).await.unwrap();
     assert_eq!(d4.added.len(), 1);
     assert_eq!(d4.added[0].subject, "Live 4");
+    assert_eq!(appended.as_deref(), Some(d4.added[0].remote_id.as_str()), "append reports the new UID");
 
     // IDLE push: a second connection appends while the first is idling.
     let watcher = std::sync::Arc::new(backend(port, Security::Tls));

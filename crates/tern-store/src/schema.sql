@@ -98,3 +98,17 @@ CREATE TABLE IF NOT EXISTS contacts (
     received  INTEGER NOT NULL DEFAULT 0,
     last_seen INTEGER NOT NULL DEFAULT 0      -- unix seconds of the newest message
 );
+
+-- Messages being written (v5+). The latest version lives here first, then is uploaded to the
+-- account's Drafts mailbox; `remote_*` is where its server copy is, replaced on each upload.
+CREATE TABLE IF NOT EXISTS drafts (
+    key            TEXT    PRIMARY KEY,      -- chosen by the compose window
+    account        TEXT    NOT NULL,
+    raw            BLOB    NOT NULL,         -- RFC 5322, Bcc kept
+    message_id     TEXT,
+    version        INTEGER NOT NULL DEFAULT 1,
+    uploaded       INTEGER NOT NULL DEFAULT 0, -- the server copy is this version
+    remote_mailbox INTEGER,
+    remote_id      TEXT,
+    remote_msgid   TEXT                      -- Message-ID of the server copy (to find it if remote_id is unknown)
+);

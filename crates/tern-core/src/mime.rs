@@ -135,19 +135,22 @@ pub fn body_from_raw(raw: Vec<u8>) -> MessageBody {
 }
 
 /// Bytes of attachment `index` (as numbered in [`MessageBody::attachments`]).
-/// Rebuild an editable [`Draft`] from a message Tern built (a refused send). `envelope_rcpts`
-/// is the SMTP envelope's recipient list: whoever is in it but not in To/Cc was Bcc, which
-/// never appears in the headers.
+/// Rebuild an editable [`Draft`] from a message (a refused send or a saved draft).
+/// `envelope_rcpts` is the SMTP envelope's recipient list, if any: whoever is in it but not in
+/// To/Cc was Bcc, which sent messages don't carry in their headers (drafts do).
 pub fn draft_from_raw(raw: &[u8], envelope_rcpts: &[String]) -> Option<Draft> {
     let msg = MessageParser::default().parse(raw)?;
     let to = addrs(msg.to());
     let cc = addrs(msg.cc());
-    let visible: Vec<String> = to.iter().chain(&cc).map(|a| a.email.to_ascii_lowercase()).collect();
-    let bcc = envelope_rcpts
-        .iter()
-        .filter(|r| !visible.contains(&r.to_ascii_lowercase()))
-        .map(|r| Address::new(None, r))
-        .collect();
+    // Drafts keep a Bcc header; sent messages only have Bcc in the envelope.
+    let mut bcc = addrs(msg.bcc());
+    let mut known: Vec<String> = to.iter().chain(&cc).chain(&bcc).map(|a| a.email.to_ascii_lowercase()).collect();
+    for r in envelope_rcpts {
+        if !known.contains(&r.to_ascii_lowercase()) {
+            known.push(r.to_ascii_lowercase());
+            bcc.push(Address::new(None, r));
+        }
+    }
     let attachments = msg
         .attachments()
         .filter(|a| a.content_disposition().is_none_or(|d| !d.is_inline()) || a.attachment_name().is_some())

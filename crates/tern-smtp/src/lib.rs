@@ -34,6 +34,17 @@ pub fn lettre_envelope(from: Option<EmailAddress>, to: Vec<EmailAddress>) -> Res
 }
 
 pub fn build(draft: &Draft) -> Result<Outgoing> {
+    build_message(draft, false)
+}
+
+/// A draft to keep in the Drafts mailbox: like a sent message but with the Bcc header kept
+/// (so reopening it restores Bcc) and allowed to have no recipients yet. Each call gets a
+/// fresh Message-ID, so successive versions can be told apart on the server.
+pub fn build_draft(draft: &Draft) -> Result<Vec<u8>> {
+    Ok(build_message(draft, true)?.raw)
+}
+
+fn build_message(draft: &Draft, as_draft: bool) -> Result<Outgoing> {
     let from = draft
         .from
         .as_ref()
@@ -58,6 +69,12 @@ pub fn build(draft: &Draft) -> Result<Outgoing> {
     }
     if !draft.references.is_empty() {
         b = b.references(draft.references.join(" "));
+    }
+    if as_draft {
+        // Drafts keep Bcc, and may have no recipients yet, which lettre's derived envelope
+        // rejects; drafts are never submitted, so any valid envelope will do.
+        let me: LAddress = from.email.parse().map_err(|e| Error::Config(format!("invalid address {}: {e}", from.email)))?;
+        b = b.keep_bcc().envelope(lettre_envelope(Some(me.clone()), vec![me])?);
     }
 
     let body = match &draft.html {
@@ -162,6 +179,30 @@ pub async fn send(server: &ServerConfig, cred: &Credential, out: &Outgoing) -> R
 mod tests {
     use super::*;
     use tern_core::model::OutgoingAttachment;
+
+    #[test]
+    fn drafts_keep_bcc_and_may_have_no_recipients() {
+        let d = Draft {
+            from: Some(Address::new(Some("Tom"), "tom@x.com")),
+            to: vec![Address::new(None, "ann@x.com")],
+            bcc: vec![Address::new(None, "boss@x.com")],
+            subject: "Plan".into(),
+            text: "half-written".into(),
+            ..Default::default()
+        };
+        let raw = build_draft(&d).unwrap();
+        let back = tern_core::mime::draft_from_raw(&raw, &[]).unwrap();
+        assert_eq!(back.bcc, d.bcc, "Bcc read back from the header");
+        assert_eq!(back.to, d.to);
+
+        let empty = Draft { from: d.from.clone(), text: "just started".into(), ..Default::default() };
+        let raw = build_draft(&empty).unwrap();
+        assert!(tern_core::mime::draft_from_raw(&raw, &[]).unwrap().to.is_empty());
+        let a = String::from_utf8_lossy(&build_draft(&empty).unwrap()).to_string();
+        let b = String::from_utf8_lossy(&build_draft(&empty).unwrap()).to_string();
+        let mid = |s: &str| s.lines().find(|l| l.starts_with("Message-ID")).map(str::to_owned);
+        assert_ne!(mid(&a), mid(&b), "each version has its own Message-ID");
+    }
 
     #[test]
     fn reads_size_from_ehlo() {

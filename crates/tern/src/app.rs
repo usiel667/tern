@@ -206,6 +206,15 @@ impl Ui {
         self.toasts.add_toast(t);
     }
 
+    /// Whether a message is in a Drafts mailbox (and so opens for editing).
+    pub fn is_draft(&self, id: MessageId) -> bool {
+        let store = self.store.borrow();
+        store
+            .message(id)
+            .and_then(|m| store.mailbox(m.mailbox))
+            .is_ok_and(|mb| mb.remote.role == MailboxRole::Drafts)
+    }
+
     /// A notice with a Review button that opens Unsent Messages.
     pub fn toast_review(&self, msg: &str) {
         let t = adw::Toast::builder()

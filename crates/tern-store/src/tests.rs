@@ -396,3 +396,36 @@ fn migrates_v3_outbox_to_v4() {
     assert_eq!(s.outbox().unwrap().len(), 1, "queued v3 rows stay queued");
     assert!(s.outbox_rejected().unwrap().is_empty());
 }
+
+#[test]
+fn drafts_keep_versions_and_their_server_copy() {
+    let (mut s, acct, inbox, _) = setup();
+    s.draft_put("k1", acct, b"v1", Some("<v1@tern>")).unwrap();
+    let d = s.draft("k1").unwrap().unwrap();
+    assert_eq!((d.version, d.uploaded, d.remote.clone()), (1, false, None));
+    assert_eq!(s.drafts_pending().unwrap().len(), 1);
+
+    // Uploaded as version 1, but version 2 was saved meanwhile: still pending.
+    s.draft_put("k1", acct, b"v2", Some("<v2@tern>")).unwrap();
+    let copy = |rid: &str, mid: &str| ServerCopy { mailbox: inbox, remote_id: Some(rid.into()), message_id: Some(mid.into()) };
+    s.draft_uploaded("k1", &copy("41", "<v1@tern>"), 1).unwrap();
+    let d = s.draft("k1").unwrap().unwrap();
+    assert_eq!((d.version, d.uploaded), (2, false));
+    assert_eq!(d.remote, Some(copy("41", "<v1@tern>")));
+    assert_eq!(d.raw, b"v2");
+
+    s.draft_uploaded("k1", &copy("42", "<v2@tern>"), 2).unwrap();
+    assert!(s.draft("k1").unwrap().unwrap().uploaded);
+    assert!(s.drafts_pending().unwrap().is_empty());
+
+    s.draft_delete("k1").unwrap();
+    assert!(s.draft("k1").unwrap().is_none());
+}
+
+#[test]
+fn finds_cached_messages_by_message_id() {
+    let (mut s, _, inbox, _) = setup();
+    add(&mut s, inbox, vec![env("7", "<draft-v3@tern>", None, "Plan", "Tom", 1)]);
+    assert_eq!(s.find_by_message_id(inbox, "<draft-v3@tern>").unwrap().map(|(_, r)| r), Some("7".into()));
+    assert!(s.find_by_message_id(inbox, "<nope@tern>").unwrap().is_none());
+}

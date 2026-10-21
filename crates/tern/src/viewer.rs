@@ -26,6 +26,7 @@ pub struct Viewer {
     subject: gtk::Label,
     remote_banner: adw::Banner,
     unsub_banner: adw::Banner,
+    draft_banner: adw::Banner,
     attachments: gtk::FlowBox,
     webview: webkit::WebView,
     loading: gtk::Spinner,
@@ -88,6 +89,8 @@ impl Viewer {
         remote_banner.set_button_label(Some("Load Remote Content"));
         let unsub_banner = adw::Banner::new("This message is from a mailing list.");
         unsub_banner.set_button_label(Some("Unsubscribe"));
+        let draft_banner = adw::Banner::new("This message is a draft.");
+        draft_banner.set_button_label(Some("Edit Draft"));
 
         let attachments = gtk::FlowBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -120,6 +123,7 @@ impl Viewer {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&thread_revealer);
         content.append(&head);
+        content.append(&draft_banner);
         content.append(&remote_banner);
         content.append(&unsub_banner);
         content.append(&attachments);
@@ -153,6 +157,7 @@ impl Viewer {
             subject,
             remote_banner,
             unsub_banner,
+            draft_banner,
             attachments,
             webview,
             loading,
@@ -202,6 +207,7 @@ impl Viewer {
         self.to.set_tooltip_text(Some(&to));
 
         self.fill_thread(ui, &m);
+        self.draft_banner.set_revealed(ui.is_draft(id));
 
         if !same {
             self.remote_banner.set_revealed(false);
@@ -361,6 +367,15 @@ pub fn connect(ui: &Rc<Ui>) {
                     }
                 }
             true
+        });
+    }
+    {
+        let weak = Rc::downgrade(ui);
+        v.draft_banner.connect_button_clicked(move |_| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(id) = ui.viewer.current() {
+                crate::compose::open_draft(&ui, id);
+            }
         });
     }
     {

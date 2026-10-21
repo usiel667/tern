@@ -23,7 +23,7 @@ use tern_core::{Error, Result};
 use tern_imap::ImapBackend;
 use tern_jmap::JmapBackend;
 use serde::{Deserialize, Serialize};
-use tern_store::Store;
+use tern_store::{ServerCopy, Store};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -140,7 +140,17 @@ pub enum Command {
         draft: Box<Draft>,
         /// Mark this message \Answered / $Forwarded once sent.
         responding_to: Option<(MessageId, FlagChange)>,
+        /// The draft this message was saved as, removed once the message is queued.
+        draft_key: Option<String>,
     },
+    /// Save a new version of the message being written under `key` (kept locally, then
+    /// uploaded to the account's Drafts mailbox, replacing the previous copy).
+    SaveDraft { key: String, account: AccountId, draft: Box<Draft> },
+    /// A message in a Drafts mailbox was opened for editing under `key`: it becomes that
+    /// draft's server copy, so saving replaces it and sending or discarding removes it.
+    AdoptDraft { key: String, account: AccountId, message: MessageId },
+    /// Throw a draft away, locally and on the server.
+    DiscardDraft(String),
     /// Put a refused message (see `Event::SendRejected`) back in line and send it now.
     RetrySend(i64),
     /// Forget a queued or refused message without sending it.
@@ -188,6 +198,8 @@ enum Internal {
     SendFailed { outbox_id: i64, account: AccountId, error: Error },
     /// Result of asking the server for its message size limit.
     SendLimit(AccountId, Option<u64>),
+    /// A draft version was appended to a Drafts mailbox (or failed to be).
+    DraftUploaded { key: String, account: AccountId, version: i64, copy: ServerCopy, result: Result<Option<String>> },
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
     /// A (re)built backend for an account, ready to start syncing. `reconnect`
     /// is set for rebuilds of an existing account (dropped if it was removed meanwhile).
@@ -290,6 +302,8 @@ pub struct Engine {
     sending: std::collections::HashSet<i64>,
     /// Each account's message size limit, when the server told us.
     send_limits: HashMap<AccountId, u64>,
+    /// Drafts with an upload in flight (one at a time per draft).
+    drafts_uploading: std::collections::HashSet<String>,
     auth_retry: HashMap<AccountId, AuthRetry>,
     connect: Connect,
     /// Accounts with a queued op in flight; ops run one at a time per account.
@@ -334,6 +348,7 @@ impl Engine {
             in_flight: Default::default(),
             sending: Default::default(),
             send_limits: Default::default(),
+            drafts_uploading: Default::default(),
             auth_retry: Default::default(),
             connect: Arc::new(|cfg| Box::pin(async move { backend_for(&cfg).await })),
             draining: Default::default(),
@@ -590,7 +605,16 @@ impl Engine {
             Command::FetchBody(id) => self.fetch_body(id),
             Command::SetFlags(ids, change) => self.set_flags(ids, change),
             Command::Move(ids, target) => self.move_messages(ids, target),
-            Command::Send { account, draft, responding_to } => self.send(account, *draft, responding_to),
+            Command::Send { account, draft, responding_to, draft_key } => {
+                self.send(account, *draft, responding_to);
+                // The outbox holds the message now; the draft has done its job.
+                if let Some(key) = draft_key {
+                    self.discard_draft(&key);
+                }
+            }
+            Command::SaveDraft { key, account, draft } => self.save_draft(key, account, *draft),
+            Command::AdoptDraft { key, account, message } => self.adopt_draft(&key, account, message),
+            Command::DiscardDraft(key) => self.discard_draft(&key),
             Command::RetrySend(id) => self.retry_send(id),
             Command::DiscardSend(id) => {
                 if let Err(e) = self.store.outbox_done(id) {
@@ -886,8 +910,12 @@ impl Engine {
         });
     }
 
-    /// Retry anything left in the outbox (previous run crashed or was offline).
+    /// Retry anything left in the outbox (previous run crashed or was offline), and drafts
+    /// that haven't reached the server yet.
     fn flush_outbox(&mut self) {
+        for d in self.store.drafts_pending().unwrap_or_default() {
+            self.upload_draft(&d.key);
+        }
         let Ok(items) = self.store.outbox() else { return };
         for item in items {
             if self.sending.contains(&item.id) {
@@ -897,6 +925,129 @@ impl Engine {
             let Some(out) = outgoing_from_item(item) else { continue };
             self.dispatch_outgoing(id, account, out, None);
         }
+    }
+
+    fn adopt_draft(&mut self, key: &str, account: AccountId, message: MessageId) {
+        let (Ok(msg), Ok((_, _, rid))) = (self.store.message(message), self.store.remote_ref(message)) else { return };
+        let raw = self.store.body(message).ok().flatten().map(|b| b.raw).unwrap_or_default();
+        let copy = ServerCopy { mailbox: msg.mailbox, remote_id: Some(rid), message_id: msg.envelope.message_id.clone() };
+        let result = self
+            .store
+            .draft_put(key, account, &raw, msg.envelope.message_id.as_deref())
+            .and_then(|()| self.store.draft_uploaded(key, &copy, 1))
+            .and_then(|()| self.store.draft_forget_others(key, &copy));
+        if let Err(e) = result {
+            self.fail(Some(account), e);
+        }
+    }
+
+    fn save_draft(&mut self, key: String, account: AccountId, mut draft: Draft) {
+        let Some(acct) = self.accounts.get(&account) else {
+            return self.fail(Some(account), "unknown account");
+        };
+        if draft.from.is_none() {
+            draft.from = Some(acct.cfg.identity.clone());
+        }
+        let raw = match tern_smtp::build_draft(&draft) {
+            Ok(r) => r,
+            Err(e) => return self.fail(Some(account), e),
+        };
+        let message_id = header_envelope(&raw).message_id;
+        if let Err(e) = self.store.draft_put(&key, account, &raw, message_id.as_deref()) {
+            return self.fail(Some(account), e);
+        }
+        self.upload_draft(&key);
+    }
+
+    /// Put the draft's latest version on the server, if it isn't already and no upload of
+    /// it is running (the running one re-uploads when it finishes if the draft changed).
+    fn upload_draft(&mut self, key: &str) {
+        if self.drafts_uploading.contains(key) {
+            return;
+        }
+        let Ok(Some(row)) = self.store.draft(key) else { return };
+        if row.uploaded {
+            return;
+        }
+        let Some(acct) = self.accounts.get(&row.account) else { return };
+        let Ok(Some(drafts)) = self.store.mailbox_by_role(row.account, MailboxRole::Drafts) else {
+            debug!(account = %row.account, "no Drafts mailbox; keeping the draft on this computer");
+            return;
+        };
+        let backend = acct.backend.clone();
+        self.drafts_uploading.insert(key.to_string());
+        let (key, account, version) = (key.to_string(), row.account, row.version);
+        let copy = ServerCopy { mailbox: drafts.id, remote_id: None, message_id: row.message_id.clone() };
+        self.spawn_task(account, async move {
+            let flags = Flags { seen: true, draft: true, ..Default::default() };
+            let result = backend.append(&drafts.remote.remote_id, &row.raw, &flags).await;
+            Internal::DraftUploaded { key, account, version, copy, result }
+        });
+    }
+
+    fn draft_uploaded(&mut self, key: String, account: AccountId, version: i64, mut copy: ServerCopy, result: Result<Option<String>>) {
+        self.drafts_uploading.remove(&key);
+        let remote_id = match result {
+            Ok(id) => id,
+            // Offline: the local copy stays pending and the periodic flush tries again.
+            Err(Error::Network(e)) => return debug!(%key, "draft not uploaded yet: {e}"),
+            Err(e) => return self.fail(Some(account), e),
+        };
+        copy.remote_id = remote_id;
+        let mailbox = copy.mailbox;
+        match self.store.draft(&key) {
+            // Discarded (or sent) while uploading: this copy isn't wanted either.
+            Ok(None) => self.delete_server_copy(account, &copy),
+            Ok(Some(row)) => {
+                if let Err(e) = self.store.draft_uploaded(&key, &copy, version) {
+                    return self.fail(Some(account), e);
+                }
+                if let Some(old) = row.remote.filter(|old| *old != copy) {
+                    self.delete_server_copy(account, &old);
+                }
+                if row.version != version {
+                    self.upload_draft(&key);
+                }
+            }
+            Err(e) => self.fail(Some(account), e),
+        }
+        self.sync_mailbox(mailbox);
+    }
+
+    fn discard_draft(&mut self, key: &str) {
+        let Ok(Some(row)) = self.store.draft(key) else { return };
+        if let Err(e) = self.store.draft_delete(key) {
+            return self.fail(Some(row.account), e);
+        }
+        if let Some(copy) = row.remote {
+            self.delete_server_copy(row.account, &copy);
+        }
+    }
+
+    /// Remove a draft copy: its local row now, the server message through the durable queue.
+    /// Without a known remote id, look it up by Message-ID in what's cached; if it isn't
+    /// cached yet, one stale copy can remain.
+    fn delete_server_copy(&mut self, account: AccountId, copy: &ServerCopy) {
+        let rid = copy.remote_id.clone().or_else(|| {
+            let mid = copy.message_id.as_deref()?;
+            self.store.find_by_message_id(copy.mailbox, mid).ok().flatten().map(|(_, rid)| rid)
+        });
+        let Some(rid) = rid else {
+            return warn!(%account, "couldn't find an old draft copy to delete");
+        };
+        let Ok(mb) = self.store.mailbox(copy.mailbox) else { return };
+        // The copy belongs to its mailbox's account, which differs from the draft's if the
+        // From account was changed while writing.
+        let account = mb.account;
+        if let Err(e) = self.store.delete_remote(copy.mailbox, std::slice::from_ref(&rid)) {
+            self.fail(Some(account), e);
+        }
+        self.emit(Event::MessagesChanged(Some(copy.mailbox)));
+        self.emit(Event::MailboxesChanged);
+        self.enqueue(
+            account,
+            Op::Destroy { mailbox: copy.mailbox, mailbox_remote: mb.remote.remote_id, remote_ids: vec![rid] },
+        );
     }
 
     fn add_account(&mut self, cfg: AccountConfig) {
@@ -1185,6 +1336,9 @@ impl Engine {
                 }
                 self.internal(Internal::Failed { account: Some(account), mailbox: None, error });
             }
+            Internal::DraftUploaded { key, account, version, copy, result } => {
+                self.draft_uploaded(key, account, version, copy, result);
+            }
             Internal::SendLimit(account, bytes) => {
                 match bytes {
                     Some(n) => self.send_limits.insert(account, n),
@@ -1223,8 +1377,13 @@ pub fn too_large(size: u64, limit: u64) -> String {
 
 /// Subject of a queued message, for notices.
 fn outbox_subject(raw: &[u8]) -> String {
+    header_envelope(raw).subject
+}
+
+/// The envelope parsed from a raw message's header.
+fn header_envelope(raw: &[u8]) -> Envelope {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
-    tern_core::mime::envelope_from_parts(String::new(), &raw[..split], None, Flags::default(), 0, None).subject
+    tern_core::mime::envelope_from_parts(String::new(), &raw[..split], None, Flags::default(), 0, None)
 }
 
 /// Turn a queued row back into an `Outgoing`, using its stored SMTP envelope.

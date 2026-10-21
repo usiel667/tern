@@ -1,6 +1,6 @@
 //! The New Message window.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -17,16 +17,31 @@ use crate::format::{
 };
 
 pub fn open_new(ui: &Rc<Ui>) {
-    open(ui, Draft::default(), None, None, true);
+    open(ui, Draft::default(), None, None, true, None);
 }
 
 /// Reopen a message that couldn't be sent, as it was (its signature is already in the text).
 pub fn open_unsent(ui: &Rc<Ui>, draft: Draft, account: AccountId) {
-    open(ui, draft, Some(account), None, false);
+    open(ui, draft, Some(account), None, false, None);
+}
+
+/// Open a message from a Drafts mailbox for editing; saving replaces it there.
+pub fn open_draft(ui: &Rc<Ui>, id: MessageId) {
+    let Ok(m) = ui.store.borrow().message(id) else { return };
+    let Some(body) = ui.store.borrow().body(id).ok().flatten() else {
+        ui.send(Command::FetchBody(id));
+        ui.toast("Downloading the draft — open it again in a moment");
+        return;
+    };
+    let Some(draft) = tern_core::mime::draft_from_raw(&body.raw, &[]) else {
+        ui.toast("This draft couldn’t be read");
+        return;
+    };
+    open(ui, draft, Some(m.account), None, false, Some(id));
 }
 
 pub fn open_mailto(ui: &Rc<Ui>, mailto: &str) {
-    open(ui, mailto_draft(mailto), None, None, true);
+    open(ui, mailto_draft(mailto), None, None, true, None);
 }
 
 /// A draft from a `mailto:` URI (RFC 6068), with or without the scheme. Only the fields a
@@ -120,7 +135,7 @@ pub fn open_response(ui: &Rc<Ui>, id: MessageId, kind: ReplyKind) {
         }
     }
     let change = if kind == ReplyKind::Forward { FlagChange::Forwarded } else { FlagChange::Answered };
-    open(ui, draft, Some(m.account), Some((id, change)), true);
+    open(ui, draft, Some(m.account), Some((id, change)), true, None);
 }
 
 struct Compose {
@@ -141,6 +156,19 @@ struct Compose {
     responding: Option<(MessageId, FlagChange)>,
     toasts: adw::ToastOverlay,
     ui: std::rc::Weak<Ui>,
+    /// Identifies this message's draft to the engine.
+    draft_key: String,
+    /// Opened from a Drafts message (that copy is this draft until replaced).
+    from_draft: bool,
+    /// The body as the window opened (signature, quote), to tell real content from none.
+    initial_text: String,
+    /// Changed since the window opened / since the last save.
+    edited: Cell<bool>,
+    dirty: Cell<bool>,
+    /// A draft of this message exists (saved, or opened from Drafts).
+    saved: Cell<bool>,
+    /// Pending "save after typing pauses" timer.
+    debounce: RefCell<Option<glib::SourceId>>,
 }
 
 impl Compose {
@@ -174,6 +202,7 @@ fn open(
     account: Option<AccountId>,
     responding: Option<(MessageId, FlagChange)>,
     add_signature: bool,
+    from_draft: Option<MessageId>,
 ) {
     let accounts: Vec<(AccountId, Address)> =
         ui.accounts.borrow().iter().map(|a| (a.id, a.identity.clone())).collect();
@@ -319,8 +348,50 @@ fn open(
         responding,
         toasts,
         ui: Rc::downgrade(ui),
+        draft_key: glib::uuid_string_random().to_string(),
+        from_draft: from_draft.is_some(),
+        initial_text: text.clone(),
+        edited: Cell::new(false),
+        dirty: Cell::new(false),
+        saved: Cell::new(from_draft.is_some()),
+        debounce: RefCell::new(None),
     });
+    if let Some(message) = from_draft {
+        let account = c.send_limit().0;
+        ui.send(Command::AdoptDraft { key: c.draft_key.clone(), account, message });
+    }
     refresh_attachments(&c);
+    // Autosave: a few seconds after changes stop, and every 30 s while they keep coming.
+    for e in [&c.to, &c.cc, &c.bcc, &c.subject] {
+        let w = Rc::downgrade(&c);
+        e.connect_changed(move |_| {
+            if let Some(c) = w.upgrade() {
+                changed(&c);
+            }
+        });
+    }
+    {
+        let w = Rc::downgrade(&c);
+        c.body.buffer().connect_changed(move |_| {
+            if let Some(c) = w.upgrade() {
+                changed(&c);
+            }
+        });
+        let w = Rc::downgrade(&c);
+        c.from.connect_selected_notify(move |_| {
+            if let Some(c) = w.upgrade() {
+                changed(&c);
+            }
+        });
+        let w = Rc::downgrade(&c);
+        glib::timeout_add_seconds_local(30, move || match w.upgrade() {
+            Some(c) => {
+                autosave(&c);
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
+    }
     {
         // Your own addresses are never suggested as recipients.
         let own: Vec<String> = ui
@@ -444,6 +515,14 @@ fn open(
                 do_send(&ui2, &c2);
                 return glib::Propagation::Stop;
             }
+            if matches!(key, gdk::Key::s | gdk::Key::S)
+                && mods.contains(gdk::ModifierType::CONTROL_MASK)
+                && !mods.contains(gdk::ModifierType::SHIFT_MASK)
+            {
+                save_now(&c2);
+                c2.toasts.add_toast(adw::Toast::new("Saved to Drafts"));
+                return glib::Propagation::Stop;
+            }
             if matches!(key, gdk::Key::A | gdk::Key::a)
                 && mods.contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
             {
@@ -457,19 +536,40 @@ fn open(
     {
         let c2 = c.clone();
         c.window.connect_close_request(move |w| {
-            let buf = c2.body.buffer();
-            let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
-            let typed = c2.to.text().len() + c2.subject.text().len() + text.trim().len();
-            if typed == 0 || w.widget_name() == "sent" {
+            if w.widget_name() == "sent" || !c2.edited.get() || (!has_content(&c2) && !c2.saved.get()) {
+                stop_autosave(&c2);
                 return glib::Propagation::Proceed;
             }
-            // TODO: "Save to Drafts" (APPEND to the Drafts mailbox).
-            let d = adw::AlertDialog::new(Some("Discard this message?"), Some("Your changes will be lost."));
-            d.add_response("cancel", "Keep Editing");
-            d.add_response("discard", "Discard");
+            let d = adw::AlertDialog::new(
+                Some("Save this message as a draft?"),
+                Some(if c2.from_draft {
+                    "Your changes will be kept in Drafts."
+                } else {
+                    "It will be kept in Drafts so you can finish it later."
+                }),
+            );
+            d.add_response("discard", "Don’t Save");
+            d.add_response("cancel", "Cancel");
+            d.add_response("save", "Save");
             d.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-            let w2 = w.clone();
-            d.connect_response(Some("discard"), move |_, _| {
+            d.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+            d.set_default_response(Some("save"));
+            d.set_close_response("cancel");
+            let (w2, c3) = (w.clone(), c2.clone());
+            d.connect_response(None, move |_, response| {
+                match response {
+                    "save" => save_now(&c3),
+                    // A new message's autosaved draft goes; a reopened draft keeps its last
+                    // saved version (it existed before this window).
+                    "discard" if c3.saved.get() && !c3.from_draft => {
+                        if let Some(ui) = c3.ui.upgrade() {
+                            ui.send(Command::DiscardDraft(c3.draft_key.clone()));
+                        }
+                    }
+                    "discard" => {}
+                    _ => return,
+                }
+                stop_autosave(&c3);
                 w2.set_widget_name("sent");
                 w2.close();
             });
@@ -510,6 +610,7 @@ fn refresh_attachments(c: &Rc<Compose>) {
         remove.connect_clicked(move |_| {
             c2.attachments.borrow_mut().remove(i);
             refresh_attachments(&c2);
+            changed(&c2);
         });
         chip.append(&remove);
         c.attach_box.append(&chip);
@@ -587,11 +688,14 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
                 let zipped = gio::spawn_blocking(move || crate::folder_zip::zip_folder(&path, MAX_FOLDER_BYTES)).await;
                 c.compressing.borrow_mut().retain(|n| *n != name);
                 match zipped {
-                    Ok(Ok((filename, data))) => c.attachments.borrow_mut().push(OutgoingAttachment {
-                        mime_type: "application/zip".into(),
-                        filename,
-                        data,
-                    }),
+                    Ok(Ok((filename, data))) => {
+                        c.attachments.borrow_mut().push(OutgoingAttachment {
+                            mime_type: "application/zip".into(),
+                            filename,
+                            data,
+                        });
+                        changed(&c);
+                    }
                     Ok(Err(e)) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t attach “{name}”: {e}"))),
                     Err(_) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t attach “{name}”"))),
                 }
@@ -606,6 +710,7 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
                         data: data.to_vec(),
                     });
                     refresh_attachments(&c);
+                    changed(&c);
                 }
                 Err(e) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t read “{name}”: {e}"))),
             }
@@ -629,6 +734,93 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
             c.toasts.add_toast(adw::Toast::new(&w));
         }
     });
+}
+
+// ------------------------------------------------------------------ drafts
+
+/// Something changed: remember it, and save once typing pauses.
+fn changed(c: &Rc<Compose>) {
+    c.edited.set(true);
+    c.dirty.set(true);
+    if let Some(id) = c.debounce.borrow_mut().take() {
+        id.remove();
+    }
+    let w = Rc::downgrade(c);
+    let id = glib::timeout_add_seconds_local_once(4, move || {
+        if let Some(c) = w.upgrade() {
+            c.debounce.borrow_mut().take();
+            autosave(&c);
+        }
+    });
+    *c.debounce.borrow_mut() = Some(id);
+}
+
+fn stop_autosave(c: &Compose) {
+    if let Some(id) = c.debounce.borrow_mut().take() {
+        id.remove();
+    }
+    c.dirty.set(false);
+}
+
+/// Save if there are unsaved changes worth keeping. Skipped while an address is half-typed
+/// (it would be dropped) or a folder is still being zipped (it would be missing).
+fn autosave(c: &Rc<Compose>) {
+    if !c.dirty.get() || !c.compressing.borrow().is_empty() || !has_content(c) {
+        return;
+    }
+    if let Some(draft) = current_draft(c, false) {
+        save(c, draft);
+    }
+}
+
+/// Save now (Ctrl+S, or Save when closing), keeping whatever addresses are valid.
+fn save_now(c: &Rc<Compose>) {
+    if let Some(draft) = current_draft(c, true) {
+        save(c, draft);
+    }
+}
+
+fn save(c: &Rc<Compose>, draft: Draft) {
+    let Some(ui) = c.ui.upgrade() else { return };
+    let account = c.send_limit().0;
+    ui.send(Command::SaveDraft { key: c.draft_key.clone(), account, draft: Box::new(draft) });
+    c.dirty.set(false);
+    c.saved.set(true);
+}
+
+/// Recipients, subject, attachments, or body text beyond what the window opened with.
+fn has_content(c: &Compose) -> bool {
+    let buf = c.body.buffer();
+    let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+    [&c.to, &c.cc, &c.bcc, &c.subject].iter().any(|e| !e.text().trim().is_empty())
+        || !c.attachments.borrow().is_empty()
+        || text.as_str() != c.initial_text
+}
+
+/// The message as it stands. Strict: `None` if an address field doesn't parse; lenient:
+/// keep the addresses that do.
+fn current_draft(c: &Compose, lenient: bool) -> Option<Draft> {
+    let field = |e: &gtk::Entry| match parse_addresses(&e.text()) {
+        Ok(v) => Some(v),
+        Err(_) if lenient => Some(
+            e.text().split([',', ';']).filter_map(|t| parse_addresses(t).ok()).flatten().collect(),
+        ),
+        Err(_) => None,
+    };
+    let buf = c.body.buffer();
+    let (_, identity) = c.accounts[c.from.selected() as usize].clone();
+    Some(Draft {
+        from: Some(identity),
+        to: field(&c.to)?,
+        cc: field(&c.cc)?,
+        bcc: field(&c.bcc)?,
+        subject: c.subject.text().to_string(),
+        text: buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string(),
+        html: None,
+        in_reply_to: c.in_reply_to.clone(),
+        references: c.references.clone(),
+        attachments: c.attachments.borrow().clone(),
+    })
 }
 
 fn do_send(ui: &Rc<Ui>, c: &Rc<Compose>) {
@@ -684,7 +876,9 @@ fn do_send(ui: &Rc<Ui>, c: &Rc<Compose>) {
         return;
     }
     // The signature is already in the body; don't let the engine add it again.
-    ui.send(Command::Send { account, draft: Box::new(draft), responding_to: c.responding });
+    stop_autosave(c);
+    let draft_key = c.saved.get().then(|| c.draft_key.clone());
+    ui.send(Command::Send { account, draft: Box::new(draft), responding_to: c.responding, draft_key });
     c.window.set_widget_name("sent");
     c.window.close();
 }
