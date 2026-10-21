@@ -13,10 +13,32 @@ dev/test-display.sh start                            # private nested Hyprland f
 dev/test-display.sh run 'mailto:?subject=x'          # tern --demo inside it (--local-dialogs: file dialogs stay inside)
 dev/test-display.sh type 'x' 'hello'                 # type text into window titled x
 dev/test-display.sh keys 'x' c h Down Return         # focus a window in it by title and press keys
+dev/test-display.sh pointer drag 100 800 300 400      # virtual mouse (move/glide/click/down/up/drag)
 dev/test-display.sh shot shot.png                    # screenshot the test display
 dev/test-imap-server.sh start                        # local Dovecot for live tests (target/dovecot)
 eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
 ```
+
+## 2026-10-20 — Dropping files from Dolphin did nothing
+
+**Saw:** dragging a file from Dolphin onto a New Message attached nothing (owner's report).
+Reproduced in the test display with Dolphin + `dev/test-display.sh pointer drag …`;
+`WAYLAND_DEBUG` showed Tern answering every motion with `set_actions(0, 0)` / `accept(nil)`.
+A bare 5-line PyGObject window with `DropTarget(FileList, COPY)` failed the same way.
+
+**Cause:** Dolphin offers copy|move and Hyprland selects **move**; GTK's `DropTarget`
+rejects a drop whose selected action isn't in its own actions, and ours was COPY only.
+Allowing COPY|MOVE makes it accept, but GTK then finishes with the compositor's choice
+(`set_actions(2, 2)`, a move) even if `enter`/`motion` return COPY — and a source may
+delete the original after a finished move (Dolphin didn't, but that's not ours to bet on).
+
+**Fix:** `DropTargetAsync` with COPY|MOVE, reading the files ourselves and calling
+`drop.finish(COPY)` (log shows `set_actions(1, 1)` before `finish()`). Also: GTK prefers
+the document portal's `application/vnd.portal.filetransfer`; when that read fails (no
+document portal, or source on another D-Bus session) we fall back to `text/uri-list`.
+
+**Lesson:** test drops with a real file manager as the source; GTK-to-GTK drags negotiate
+copy and would have hidden this.
 
 ## 2026-10-20 — Autocomplete popover mapped but never drawn
 

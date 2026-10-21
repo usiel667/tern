@@ -238,6 +238,15 @@ pub fn mime_for(filename: &str) -> &'static str {
     }
 }
 
+/// URIs from a `text/uri-list` (RFC 2483): one per line, `#` lines are comments, CRLF or LF.
+pub fn parse_uri_list(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect()
+}
+
 /// Many servers (Gmail included) reject messages larger than this.
 pub const LARGE_ATTACHMENTS: u64 = 25 * 1024 * 1024;
 
@@ -274,6 +283,15 @@ mod tests {
         assert_eq!(list_date(at(Duration::days(3)), now), "Sunday");
         assert_eq!(list_date(at(Duration::days(30)), now), "Sep 14");
         assert_eq!(list_date(at(Duration::days(400)), now), "9/9/25");
+    }
+
+    #[test]
+    fn uri_lists() {
+        assert_eq!(
+            parse_uri_list("# from dolphin\r\nfile:///a/b.txt\r\nfile:///c%20d.pdf\r\n\r\n"),
+            ["file:///a/b.txt", "file:///c%20d.pdf"]
+        );
+        assert!(parse_uri_list("").is_empty());
     }
 
     #[test]

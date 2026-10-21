@@ -2,7 +2,12 @@
 
 ## Decisions
 
-- **One `gtk::DropTarget` for `gdk::FileList` on the compose window, in the capture phase.**
+- **`gtk::DropTargetAsync` (not `DropTarget`) accepting copy|move, finished as copy.**
+  File managers offer copy|move and Hyprland selects move; a copy-only `DropTarget` rejects
+  that, and a copy|move one finishes as a move (which may make the source delete the
+  original). Reading the value ourselves lets us `finish(COPY)`. If GTK's preferred
+  document-portal transfer can't be read, fall back to `text/uri-list`.
+- **The drop target sits on the compose window, in the capture phase.**
   The body `TextView` has its own drop target for text; file managers also offer
   `text/plain`, so a bubble-phase target on the window would lose to the text view and the
   file path would be typed into the body. In the capture phase the window sees the drop
@@ -21,6 +26,6 @@
 
 ## Risks / Trade-offs
 
-- Drag and drop can't be driven by the automated test display (no pointer injection), so
-  the drop itself is verified by hand; the loading/labeling logic is shared with the picker
-  and the pure helpers are unit-tested.
+- Drops are tested with a real file manager in the test display via a virtual pointer
+  (`dev/test-display.sh pointer`); the first version passed GTK-only reasoning but failed
+  with Dolphin because of the move/copy negotiation above.

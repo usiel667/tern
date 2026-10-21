@@ -9,13 +9,16 @@
 #                                             # display (no portal), at the cost of desktop theming
 #   dev/test-display.sh keys TITLE KEY…       # focus window TITLE (Lua pattern) and press keys
 #   dev/test-display.sh type TITLE TEXT       # type TEXT (letters, digits, common punctuation)
+#   dev/test-display.sh pointer CMD…          # virtual mouse: move X Y | glide X Y | click |
+#                                             #   down | up | sleep MS | drag X1 Y1 X2 Y2
 #   dev/test-display.sh shot FILE.png         # screenshot the whole nested display
 #   dev/test-display.sh stop
 #
 # KEY is a key name (a, Return, Down, Escape, BackSpace, Tab…), optionally MODS+KEY
 # (e.g. CTRL+Return). Text: `keys TITLE m a y a`.
 #
-# Needs Hyprland and grim. On the outer Hyprland, a window rule for class `aquamarine`
+# Needs Hyprland and grim; `pointer` also needs gcc, wayland-scanner and wayland-client
+# (builds dev/vpointer on first use). On the outer Hyprland, a window rule for class `aquamarine`
 # (the nested window) with `workspace = "8 silent"`, `no_initial_focus = true` and
 # `suppress_event = "activate activatefocus"` keeps the window from taking focus, and
 # `render_unfocused = true` keeps it drawing while workspace 8 isn't on screen.
@@ -129,6 +132,21 @@ LUA
             esac
         done
         exec "$0" keys "$title" "${keys[@]}"
+        ;;
+    pointer)
+        shift
+        need
+        bin="$DIR/vpointer"
+        src="$ROOT/dev/vpointer"
+        if [[ ! -x "$bin" || "$src/vpointer.c" -nt "$bin" ]]; then
+            wayland-scanner client-header "$src/wlr-virtual-pointer-unstable-v1.xml" \
+                "$DIR/wlr-virtual-pointer-unstable-v1-client-protocol.h"
+            wayland-scanner private-code "$src/wlr-virtual-pointer-unstable-v1.xml" "$DIR/wlr-virtual-pointer-protocol.c"
+            gcc -O2 -Wall -I"$DIR" -o "$bin" "$src/vpointer.c" "$DIR/wlr-virtual-pointer-protocol.c" -lwayland-client
+        fi
+        read -r W H < <(HYPRLAND_INSTANCE_SIGNATURE="$SIG" hyprctl monitors -j |
+            python3 -c "import json,sys;m=json.load(sys.stdin)[0];print(round(m['width']/m['scale']), round(m['height']/m['scale']))")
+        WAYLAND_DISPLAY="$SOCK" "$bin" "$W" "$H" "$@"
         ;;
     shot)
         need

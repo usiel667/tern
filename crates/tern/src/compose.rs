@@ -10,7 +10,9 @@ use tern_core::model::{AccountId, Address, Draft, MessageId, OutgoingAttachment}
 use tern_sync::{Command, FlagChange};
 
 use crate::app::Ui;
-use crate::format::{crosses_size_limit, format_addresses, human_size, mime_for, parse_addresses, LARGE_ATTACHMENTS};
+use crate::format::{
+    crosses_size_limit, format_addresses, human_size, mime_for, parse_addresses, parse_uri_list, LARGE_ATTACHMENTS,
+};
 
 pub fn open_new(ui: &Rc<Ui>) {
     open(ui, Draft::default(), None, None);
@@ -322,41 +324,57 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         attach.connect_clicked(move |_| pick_files(&c2));
     }
     {
+        // DropTargetAsync, not DropTarget: file managers offer copy *or* move and Hyprland
+        // picks move, which a copy-only DropTarget rejects outright, while a copy|move one
+        // finishes the drop as a move. Here we accept both but always finish as a copy, so
+        // no source ever treats the drop as "moved away".
         // Capture phase: the body TextView has its own drop target for text, and file
-        // managers offer text too, so the window has to see a file drop first.
-        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        // managers may offer text too, so the window has to see a file drop first.
+        let files = gdk::FileList::static_type();
+        let drop = gtk::DropTargetAsync::new(
+            Some(gdk::ContentFormats::for_type(files)),
+            gdk::DragAction::COPY | gdk::DragAction::MOVE,
+        );
         drop.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let hover = move |on: bool| {
+        let hover = Rc::new(move |on: bool| {
             if on {
                 content_overlay.add_css_class("drop-hover");
             } else {
                 content_overlay.remove_css_class("drop-hover");
             }
             drop_hint.set_visible(on);
-        };
-        let hover = Rc::new(hover);
+        });
         {
             let hover = hover.clone();
-            drop.connect_enter(move |_, _, _| {
+            drop.connect_drag_enter(move |_, _, _, _| {
                 hover(true);
                 gdk::DragAction::COPY
             });
         }
+        drop.connect_drag_motion(|_, _, _, _| gdk::DragAction::COPY);
         {
             let hover = hover.clone();
-            drop.connect_leave(move |_| hover(false));
+            drop.connect_drag_leave(move |_, _| hover(false));
         }
         let c2 = c.clone();
-        drop.connect_drop(move |_, value, _, _| {
+        drop.connect_drop(move |_, drop, _, _| {
             hover(false);
-            let Ok(list) = value.get::<gdk::FileList>() else { return false };
-            let (local, links): (Vec<gio::File>, Vec<gio::File>) =
-                list.files().into_iter().partition(|f| f.is_native());
-            // A link dragged from a browser is text for the body, not something to download.
-            for link in links {
-                c2.body.buffer().insert_at_cursor(&format!("{} ", link.uri()));
-            }
-            add_files(&c2, local);
+            let (c2, drop) = (c2.clone(), drop.clone());
+            glib::spawn_future_local(async move {
+                let Some(dropped) = dropped_files(&drop).await else {
+                    drop.finish(gdk::DragAction::empty());
+                    c2.toasts.add_toast(adw::Toast::new("Couldn’t read the dropped files"));
+                    return;
+                };
+                drop.finish(gdk::DragAction::COPY);
+                let (local, links): (Vec<gio::File>, Vec<gio::File>) =
+                    dropped.into_iter().partition(|f| f.is_native());
+                // A link dragged from a browser is text for the body, not something to download.
+                for link in links {
+                    c2.body.buffer().insert_at_cursor(&format!("{} ", link.uri()));
+                }
+                add_files(&c2, local);
+            });
             true
         });
         c.window.add_controller(drop);
@@ -474,6 +492,32 @@ fn pick_files(c: &Rc<Compose>) {
         let files = (0..files.n_items()).filter_map(|i| files.item(i).and_downcast::<gio::File>()).collect();
         add_files(&c2, files);
     });
+}
+
+/// The files in a drop. GTK prefers the document portal's transfer format when the source
+/// offers it; if that fails (no document portal running, as on many Hyprland setups), fall
+/// back to the plain `text/uri-list` every file manager also sends.
+async fn dropped_files(drop: &gdk::Drop) -> Option<Vec<gio::File>> {
+    if let Ok(v) = drop.read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT).await
+        && let Ok(list) = v.get::<gdk::FileList>()
+    {
+        return Some(list.files());
+    }
+    if !drop.formats().contain_mime_type("text/uri-list") {
+        return None;
+    }
+    let (input, _) = drop.read_future(&["text/uri-list"], glib::Priority::DEFAULT).await.ok()?;
+    let out = gio::MemoryOutputStream::new_resizable();
+    out.splice_future(
+        &input,
+        gio::OutputStreamSpliceFlags::CLOSE_SOURCE | gio::OutputStreamSpliceFlags::CLOSE_TARGET,
+        glib::Priority::DEFAULT,
+    )
+    .await
+    .ok()?;
+    let bytes = out.steal_as_bytes();
+    let uris = parse_uri_list(&String::from_utf8_lossy(&bytes));
+    (!uris.is_empty()).then(|| uris.iter().map(|u| gio::File::for_uri(u)).collect())
 }
 
 /// Read files in the background (no freeze on big ones) and attach them. Folders are
