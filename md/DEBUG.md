@@ -9,6 +9,10 @@ Handy commands:
 RUST_LOG=tern_sync=debug,tern_imap=debug cargo run   # verbose sync logging
 cargo run -- --demo                                  # fake account, no network/keyring
 grim -g "X,Y WxH" shot.png                           # screenshot a window (geometry from hyprctl clients -j)
+dev/test-display.sh start                            # private nested Hyprland for UI tests (never steals focus)
+dev/test-display.sh run 'mailto:?subject=x'          # tern --demo inside it
+dev/test-display.sh keys 'x' c h Down Return         # focus a window in it by title and press keys
+dev/test-display.sh shot shot.png                    # screenshot the test display
 dev/test-imap-server.sh start                        # local Dovecot for live tests (target/dovecot)
 eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
 ```
@@ -27,9 +31,11 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 **Also learned while testing:** (1) GTK fires `changed` before moving the cursor, so a
 "cursor at end" check inside `changed` always fails. (2) Under Hyprland, popovers only show
 while their window is focused; `hl.dsp.send_shortcut` types into a window without
-focusing it, so focus it first with `hl.dsp.focus({window='title:…'})`. (3) Demo windows go
-to workspace 8 via the `tern_demo_ws8` rule in `~/.config/hypr/hyprland.lua`; a rule added
-with `hyprctl eval` doesn't take effect, and an exec rule only catches the first window.
+focusing it, so focus it first with `hl.dsp.focus({window='title:…'})` — but doing that on
+the real desktop steals the developer's focus mid-typing. UI tests now run in a nested
+Hyprland (`dev/test-display.sh`), which has its own seat, so focus and keys stay inside it.
+(3) Window rules: a rule added with `hyprctl eval` doesn't take effect (put it in
+`hyprland.lua`), and an exec rule only catches a process's first window.
 
 ---
 
