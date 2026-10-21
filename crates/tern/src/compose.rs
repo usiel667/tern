@@ -10,6 +10,7 @@ use tern_core::model::{AccountId, Address, Draft, MessageId, OutgoingAttachment}
 use tern_sync::{Command, FlagChange};
 
 use crate::app::Ui;
+use crate::folder_zip::MAX_FOLDER_BYTES;
 use crate::format::{
     crosses_size_limit, format_addresses, human_size, mime_for, parse_addresses, parse_uri_list, LARGE_ATTACHMENTS,
 };
@@ -125,6 +126,8 @@ struct Compose {
     subject: gtk::Entry,
     body: gtk::TextView,
     attachments: RefCell<Vec<OutgoingAttachment>>,
+    /// Folders being zipped in the background, by name; shown as busy chips.
+    compressing: RefCell<Vec<String>>,
     attach_box: gtk::FlowBox,
     accounts: Vec<(AccountId, Address)>,
     in_reply_to: Option<String>,
@@ -280,6 +283,7 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         subject,
         body,
         attachments: RefCell::new(draft.attachments),
+        compressing: RefCell::new(Vec::new()),
         attach_box,
         accounts,
         in_reply_to: draft.in_reply_to,
@@ -481,7 +485,14 @@ fn refresh_attachments(c: &Rc<Compose>) {
         chip.append(&remove);
         c.attach_box.append(&chip);
     }
-    c.attach_box.set_visible(!c.attachments.borrow().is_empty());
+    for name in c.compressing.borrow().iter() {
+        let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        chip.add_css_class("attachment-chip");
+        chip.append(&gtk::Spinner::builder().spinning(true).build());
+        chip.append(&gtk::Label::new(Some(&format!("Compressing “{name}”…"))));
+        c.attach_box.append(&chip);
+    }
+    c.attach_box.set_visible(!c.attachments.borrow().is_empty() || !c.compressing.borrow().is_empty());
 }
 
 fn pick_files(c: &Rc<Compose>) {
@@ -521,7 +532,8 @@ async fn dropped_files(drop: &gdk::Drop) -> Option<Vec<gio::File>> {
 }
 
 /// Read files in the background (no freeze on big ones) and attach them. Folders are
-/// skipped; a file that can't be read gets its own notice.
+/// zipped (off the main thread) and attached as `Name.zip`; anything that can't be read
+/// gets its own notice.
 fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
     if files.is_empty() {
         return;
@@ -536,7 +548,25 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "attachment".into());
             if file.query_file_type(gio::FileQueryInfoFlags::NONE, gio::Cancellable::NONE) == gio::FileType::Directory {
-                c.toasts.add_toast(adw::Toast::new(&format!("“{name}” is a folder; folders can’t be attached")));
+                // Email has no folders: attach it zipped, like Apple Mail.
+                let Some(path) = file.path() else {
+                    c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t read the folder “{name}”")));
+                    continue;
+                };
+                c.compressing.borrow_mut().push(name.clone());
+                refresh_attachments(&c);
+                let zipped = gio::spawn_blocking(move || crate::folder_zip::zip_folder(&path, MAX_FOLDER_BYTES)).await;
+                c.compressing.borrow_mut().retain(|n| *n != name);
+                match zipped {
+                    Ok(Ok((filename, data))) => c.attachments.borrow_mut().push(OutgoingAttachment {
+                        mime_type: "application/zip".into(),
+                        filename,
+                        data,
+                    }),
+                    Ok(Err(e)) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t attach “{name}”: {e}"))),
+                    Err(_) => c.toasts.add_toast(adw::Toast::new(&format!("Couldn’t attach “{name}”"))),
+                }
+                refresh_attachments(&c);
                 continue;
             }
             match file.load_contents_future().await {
@@ -561,6 +591,10 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
 }
 
 fn do_send(ui: &Rc<Ui>, c: &Rc<Compose>) {
+    if let Some(name) = c.compressing.borrow().first() {
+        c.toasts.add_toast(adw::Toast::new(&format!("Still compressing “{name}” — send again in a moment")));
+        return;
+    }
     let parse = |e: &gtk::Entry| parse_addresses(&e.text());
     let (to, cc, bcc) = match (parse(&c.to), parse(&c.cc), parse(&c.bcc)) {
         (Ok(a), Ok(b), Ok(d)) => (a, b, d),

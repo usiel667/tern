@@ -53,6 +53,7 @@ keyring = "4"
 base64 = "0.22"
 url = "2"
 async-channel = "2"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs", "chrono"] }
 
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }

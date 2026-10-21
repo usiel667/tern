@@ -115,7 +115,7 @@ Key decisions:
 | From account picker | ✅ | |
 | Cc / Bcc | ✅ | Bcc kept out of headers |
 | Attachments (pick) | ✅ | forward carries originals |
-| Attachments (drag & drop into window) | ✅ | anywhere on the window incl. body; folders skipped, links become text; sizes on chips, 25 MB warning; Shift+Ctrl+A picker |
+| Attachments (drag & drop into window) | ✅ | anywhere on the window incl. body; folders zipped (`Name.zip`, no hidden files/symlinks, ≤ 200 MB); links become text; sizes on chips, 25 MB warning; Shift+Ctrl+A picker |
 | Signatures | 🟡 | per-account plain text in accounts.toml; no editor yet |
 | Address autocomplete from history/contacts | ✅ | from cached mail (`contacts` table, schema v3); people you wrote to rank first; no system address book yet |
 | Rich text (bold, lists, fonts) | ⬜ | likely a WebKit contenteditable editor |
@@ -159,7 +159,8 @@ Key decisions:
    - ✅ Drag-and-drop attachments: capture-phase drop target on the compose window (beats the
      body's text drop), files read async (picker too), folders skipped, browser links inserted
      as text, chip sizes + 25 MB warning, Shift+Ctrl+A opens the picker (OpenSpec change
-     `drag-drop-attachments`).
+     `drag-drop-attachments`). Dropped folders are zipped in the background and attached as
+     `Name.zip`; sending waits until compression finishes (`zip-dropped-folders`).
    - ⬜ Save to Drafts / autosave.
    - ⬜ Undo Send (outbox delay).
    - ⬜ Signature editor.
@@ -178,6 +179,9 @@ Key decisions:
 - Failed sends retry every 5 minutes with no limit, and there's no Outbox view to see or
   cancel them (attempts and last error are recorded in the `outbox` table).
 - Sends queued before schema v2 (milestone 1) still lose Bcc if resumed.
+- Over-size messages aren't caught before sending: there's only a 25 MB warning, the
+  server's real limit (SMTP `SIZE`, JMAP `maxSizeUpload`) isn't checked, and a send the
+  server rejects as too big would retry every 5 minutes like any other failed send.
 - Address suggestions can't be removed or edited, and Bcc recipients are only learned if
   they write back (they're not in the Sent copy).
 - The UI layer has no automated tests yet; `--demo` plus Xvfb screenshots is the current check.

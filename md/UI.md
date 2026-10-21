@@ -23,6 +23,9 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
+- **2026-10-20 — Folders attach as zips:** dropping a folder shows a "Compressing “Name”…"
+  chip with a spinner in the attachment strip, then a normal `Name.zip` chip. Send is
+  refused with a notice while anything is still compressing.
 - **2026-10-20 — Drag-and-drop attachments:** dropping files anywhere on a New Message
   attaches them; while dragging, the window gets a dashed accent outline and a "Drop to
   attach" pill near the bottom. Chips show the size; a toast warns past 25 MB.

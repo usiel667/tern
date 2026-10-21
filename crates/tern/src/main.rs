@@ -10,6 +10,7 @@ mod accounts;
 mod app;
 mod autocomplete;
 mod compose;
+mod folder_zip;
 mod format;
 mod message_list;
 mod sidebar;
