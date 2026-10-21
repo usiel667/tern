@@ -46,8 +46,13 @@ case "${1:-}" in
         mkdir -p "$DIR/config/hypr"
         # Own XDG_CONFIG_HOME so the nested instance can never pick up your real config
         # (and its autostart apps).
-        echo "-- Test display for Tern: no autostart, no binds; driven by dev/test-display.sh" \
-            > "$DIR/config/hypr/hyprland.lua"
+        # Scale 1: the nested output is as many pixels as the outer window is logical pixels,
+        # so scale 1 shows apps at the outer desktop's size with the most room (Hyprland would
+        # otherwise pick 2 and halve the usable area).
+        cat > "$DIR/config/hypr/hyprland.lua" <<'LUA'
+-- Test display for Tern: no autostart, no binds; driven by dev/test-display.sh
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
+LUA
         XDG_CONFIG_HOME="$DIR/config" nohup Hyprland -c "$DIR/config/hypr/hyprland.lua" \
             </dev/null >"$DIR/hyprland.log" 2>&1 &
         echo $! > "$DIR/hyprland.pid"
