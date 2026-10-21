@@ -168,7 +168,9 @@ Key decisions:
    - ✅ Send size limits and refused sends: each account's real limit (Gmail 35,882,577,
      iCloud 28,319,744 bytes encoded), checked on Send; server refusals stop retrying and go to
      Unsent Messages (schema v4) (OpenSpec change `send-size-limits`).
-   - ⬜ Gmail app passwords (no Google verification needed).
+   - ✅ Gmail app passwords: Add Account → Google asks for an app password (spaces removed);
+     browser sign-in is offered only when an OAuth client is configured; a refused password
+     explains app passwords (OpenSpec change `gmail-app-passwords`).
    - ⬜ Save to Drafts / autosave.
    - ⬜ Undo Send (outbox delay).
    - ⬜ Signature editor.

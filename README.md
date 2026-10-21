@@ -22,7 +22,7 @@ Apple Mail feature map and what's next.
 | Account type | Protocol | Sign-in | Sending |
 |---|---|---|---|
 | iCloud | IMAP | app-specific password | SMTP |
-| Google | IMAP | OAuth2 in your browser | SMTP (XOAUTH2) |
+| Google | IMAP | app password (or OAuth2 in your browser, see below) | SMTP |
 | Fastmail | JMAP | API token | JMAP submission |
 | Anything else | IMAP | password / app password | SMTP |
 
@@ -59,7 +59,15 @@ windowrulev2 = size 760 640, class:^(dev.tern.Tern)$, title:^(New Message|Re: .*
 
 ## Google accounts
 
-Google requires every app to bring its own OAuth client:
+The simple way is an **app password**: turn on 2-Step Verification for your Google
+account, create an app password at <https://myaccount.google.com/apppasswords>, and enter it
+in Add Account → Google (spaces are fine). Use it instead of your regular Google password.
+Some Google Workspace (work/school) accounts don't allow app passwords; ask your admin.
+
+### Browser sign-in (OAuth) for developers
+
+Tern doesn't ship a Google-verified OAuth client yet, so browser sign-in needs one of your
+own; when it's configured, Add Account → Google offers it as a second sign-in method:
 
 1. In Google Cloud Console, create a project and enable the **Gmail API**.
 2. Configure the OAuth consent screen (External, Testing) and add your address as a test user.

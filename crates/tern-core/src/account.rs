@@ -135,6 +135,19 @@ impl AccountConfig {
     }
 }
 
+impl AccountConfig {
+    /// The secret as it should be saved. Google shows app passwords as four groups of four
+    /// letters ("abcd efgh ijkl mnop") but signs in without the spaces; other secrets only
+    /// lose surrounding whitespace (Apple's app-specific passwords keep their dashes).
+    pub fn clean_secret(&self, secret: &str) -> String {
+        if self.provider == Provider::Gmail && self.auth == AuthMethod::Password {
+            secret.split_whitespace().collect()
+        } else {
+            secret.trim().to_string()
+        }
+    }
+}
+
 fn server(host: &str, port: u16, security: Security) -> ServerConfig {
     ServerConfig {
         host: host.into(),
@@ -160,6 +173,13 @@ mod tests {
         assert_eq!(g.auth, AuthMethod::OAuth2Google);
         let f = AccountConfig::preset(Provider::Fastmail, "T", "t@fastmail.com");
         assert!(matches!(f.transport, Transport::Jmap { .. }));
+        let mut gmail = g.clone();
+        gmail.auth = AuthMethod::Password;
+        assert_eq!(gmail.clean_secret(" abcd efgh ijkl mnop \n"), "abcdefghijklmnop");
+        let icloud = AccountConfig::preset(Provider::ICloud, "T", "t@icloud.com");
+        assert_eq!(icloud.clean_secret(" abcd-efgh-ijkl-mnop "), "abcd-efgh-ijkl-mnop");
+        let other = AccountConfig::preset(Provider::Generic, "T", "t@example.org");
+        assert_eq!(other.clean_secret(" my pass phrase "), "my pass phrase", "inner spaces kept");
         let x = AccountConfig::preset(Provider::Generic, "T", "t@example.org");
         match x.transport {
             Transport::Imap { imap, .. } => assert_eq!(imap.host, "imap.example.org"),

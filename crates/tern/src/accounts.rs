@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use tern_core::account::{AccountConfig, Provider, Security, ServerConfig, Transport};
+use tern_core::account::{AccountConfig, AuthMethod, Provider, Security, ServerConfig, Transport};
 use tern_sync::Command;
 
 use crate::app::Ui;
@@ -25,9 +25,14 @@ pub fn open(ui: &Rc<Ui>) {
     let group = adw::PreferencesGroup::builder()
         .title("Choose a mail account provider")
         .build();
+    let google = if tern_auth::google::configured() {
+        "App password or browser sign-in"
+    } else {
+        "Uses an app password"
+    };
     for (provider, title, subtitle, icon) in [
         (Provider::ICloud, "iCloud", "Uses an app-specific password", "weather-overcast-symbolic"),
-        (Provider::Gmail, "Google", "Sign in with your browser", "web-browser-symbolic"),
+        (Provider::Gmail, "Google", google, "web-browser-symbolic"),
         (Provider::Fastmail, "Fastmail", "Uses a JMAP API token", "mail-send-receive-symbolic"),
         (Provider::Generic, "Other Mail Account…", "IMAP and SMTP", "mail-unread-symbolic"),
     ] {
@@ -55,22 +60,39 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
     let secret = adw::PasswordEntryRow::builder()
         .title(match provider {
             Provider::ICloud => "App-Specific Password",
+            Provider::Gmail => "App Password",
             Provider::Fastmail => "API Token",
-            _ => "Password",
+            Provider::Generic => "Password",
         })
         .build();
+    // Google: app passwords always work; browser sign-in only with an OAuth client configured
+    // (until Tern's own client is verified by Google).
+    let method = (provider == Provider::Gmail && tern_auth::google::configured()).then(|| {
+        adw::ComboRow::builder()
+            .title("Sign-In Method")
+            .model(&gtk::StringList::new(&["App Password", "Browser"]))
+            .build()
+    });
     let identity = adw::PreferencesGroup::new();
     identity.add(&name);
     identity.add(&email);
-    if provider != Provider::Gmail {
-        identity.add(&secret);
+    if let Some(m) = &method {
+        identity.add(m);
     }
+    identity.add(&secret);
+    const GMAIL_APP_PASSWORD: &str = "Create one at myaccount.google.com/apppasswords (needs 2-Step Verification) \
+         and enter it here — not your regular Google password.";
+    const GMAIL_BROWSER: &str = "Your browser will open so you can sign in to Google.";
     identity.set_description(Some(match provider {
         Provider::ICloud => "Create one at account.apple.com → Sign-In and Security → App-Specific Passwords.",
         Provider::Fastmail => "Create one in Fastmail → Settings → Privacy & Security → API tokens, with Mail and Submission access.",
-        Provider::Gmail => "Your browser will open so you can sign in to Google. Requires TERN_GOOGLE_CLIENT_ID (see README).",
+        Provider::Gmail => GMAIL_APP_PASSWORD,
         Provider::Generic => "Use an app password if your provider has two-factor authentication.",
     }));
+    let uses_browser = {
+        let method = method.clone();
+        move || method.as_ref().is_some_and(|m| m.selected() == 1)
+    };
 
     let imap_host = adw::EntryRow::builder().title("Incoming (IMAP) Server").build();
     let imap_port = adw::EntryRow::builder().title("IMAP Port").text("993").build();
@@ -98,10 +120,19 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
     let status = gtk::Label::builder().wrap(true).css_classes(["error"]).visible(false).build();
     let spinner = gtk::Spinner::new();
     let button = gtk::Button::builder()
-        .label(if provider == Provider::Gmail { "Sign In with Google" } else { "Sign In" })
+        .label("Sign In")
         .css_classes(["pill", "suggested-action"])
         .halign(gtk::Align::Center)
         .build();
+    if let Some(m) = &method {
+        let (secret, identity, button) = (secret.clone(), identity.clone(), button.clone());
+        m.connect_selected_notify(move |m| {
+            let browser = m.selected() == 1;
+            secret.set_visible(!browser);
+            identity.set_description(Some(if browser { GMAIL_BROWSER } else { GMAIL_APP_PASSWORD }));
+            button.set_label(if browser { "Sign In with Google" } else { "Sign In" });
+        });
+    }
     let actions = gtk::Box::new(gtk::Orientation::Vertical, 12);
     actions.set_margin_top(12);
     actions.append(&status);
@@ -130,11 +161,16 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
             show_error(&status, "Enter your name and email address.");
             return;
         }
-        if provider != Provider::Gmail && secret_s.is_empty() {
+        let browser = uses_browser();
+        if !browser && secret_s.trim().is_empty() {
             show_error(&status, "Enter your password or token.");
             return;
         }
         let mut cfg = AccountConfig::preset(provider, &name_s, &email_s);
+        if provider == Provider::Gmail && !browser {
+            cfg.auth = AuthMethod::Password;
+        }
+        let secret_s = cfg.clean_secret(&secret_s);
         if provider == Provider::Generic {
             let port = |e: &adw::EntryRow, d: u16| e.text().trim().parse::<u16>().unwrap_or(d);
             let sec = |p: u16| if matches!(p, 143 | 587 | 25) { Security::StartTls } else { Security::Tls };
@@ -196,7 +232,7 @@ fn verify_in_background(cfg: AccountConfig, secret: String) -> async_channel::Re
 }
 
 async fn verify(cfg: &AccountConfig, secret: String) -> Result<(), String> {
-    if cfg.provider == Provider::Gmail {
+    if cfg.auth == AuthMethod::OAuth2Google {
         let tokens = tern_auth::google::sign_in(&cfg.identity.email, |url| {
             let _ = std::process::Command::new("xdg-open").arg(url).spawn();
         })
@@ -213,7 +249,7 @@ async fn verify(cfg: &AccountConfig, secret: String) -> Result<(), String> {
         Transport::Imap { imap, .. } => tern_imap::ImapBackend::new(imap.clone(), cred)
             .verify()
             .await
-            .map_err(|e| format!("Couldn’t sign in to {}: {e}", imap.host)),
+            .map_err(|e| signin_error(cfg, &imap.host, &e)),
         Transport::Jmap { session_url } => {
             let tern_auth::Credential::Bearer { token } = cred else {
                 return Err("JMAP needs an API token".into());
@@ -226,4 +262,32 @@ async fn verify(cfg: &AccountConfig, secret: String) -> Result<(), String> {
 async fn tern_jmap_verify(session_url: &str, token: String) -> Result<(), String> {
     let b = tern_sync::jmap_backend(session_url.to_string(), token);
     b.list_mailboxes().await.map(|_| ()).map_err(|e| format!("Couldn’t sign in to Fastmail: {e}"))
+}
+
+/// The message shown when signing in fails. Google refuses regular passwords over IMAP, which
+/// is the most likely mistake with a Gmail account, so say what's needed instead.
+fn signin_error(cfg: &AccountConfig, host: &str, e: &tern_core::Error) -> String {
+    if cfg.provider == Provider::Gmail && cfg.auth == AuthMethod::Password && matches!(e, tern_core::Error::Auth(_)) {
+        return "Google didn’t accept that password. Use an app password, not your regular Google password: \
+                create one at myaccount.google.com/apppasswords (needs 2-Step Verification)."
+            .into();
+    }
+    format!("Couldn’t sign in to {host}: {e}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gmail_password_errors_explain_app_passwords() {
+        let mut gmail = AccountConfig::preset(Provider::Gmail, "T", "t@gmail.com");
+        gmail.auth = AuthMethod::Password;
+        let refused = tern_core::Error::Auth("[ALERT] Application-specific password required".into());
+        assert!(signin_error(&gmail, "imap.gmail.com", &refused).contains("app password"));
+        let offline = tern_core::Error::Network("connection refused".into());
+        assert!(signin_error(&gmail, "imap.gmail.com", &offline).starts_with("Couldn’t sign in to imap.gmail.com"));
+        let icloud = AccountConfig::preset(Provider::ICloud, "T", "t@icloud.com");
+        assert!(signin_error(&icloud, "imap.mail.me.com", &refused).starts_with("Couldn’t sign in"));
+    }
 }

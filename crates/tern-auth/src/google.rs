@@ -23,6 +23,12 @@ const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const SCOPE: &str = "https://mail.google.com/";
 
+/// Whether a Google OAuth client is configured, so browser sign-in can be offered. Without
+/// one, Gmail accounts use app passwords.
+pub fn configured() -> bool {
+    std::env::var_os("TERN_GOOGLE_CLIENT_ID").is_some_and(|v| !v.is_empty())
+}
+
 fn client_creds() -> Result<(String, Option<String>)> {
     let id = std::env::var("TERN_GOOGLE_CLIENT_ID").map_err(|_| {
         Error::Config("set TERN_GOOGLE_CLIENT_ID (see tern-auth/src/google.rs)".into())
