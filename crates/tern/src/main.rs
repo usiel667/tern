@@ -8,6 +8,7 @@
 
 mod accounts;
 mod app;
+mod autocomplete;
 mod compose;
 mod format;
 mod message_list;

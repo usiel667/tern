@@ -87,3 +87,13 @@ CREATE TABLE IF NOT EXISTS pending_ops (
     op      TEXT    NOT NULL,  -- JSON-encoded tern_sync::Op
     created INTEGER NOT NULL
 );
+
+-- Addresses seen in mail, for recipient suggestions (v3+). `sent` counts messages in Sent
+-- addressed to them, `received` messages from them elsewhere; both only rank suggestions.
+CREATE TABLE IF NOT EXISTS contacts (
+    email     TEXT    PRIMARY KEY COLLATE NOCASE,
+    name      TEXT,
+    sent      INTEGER NOT NULL DEFAULT 0,
+    received  INTEGER NOT NULL DEFAULT 0,
+    last_seen INTEGER NOT NULL DEFAULT 0      -- unix seconds of the newest message
+);

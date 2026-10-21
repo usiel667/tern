@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     conn: Connection,
@@ -203,9 +203,11 @@ impl Store {
 
     /// Apply a backend delta atomically, then recompute conversations.
     pub fn apply_delta(&mut self, mailbox: MailboxId, delta: &MailboxDelta) -> Result<()> {
-        let account: String = self
+        let (account, role): (String, String) = self
             .conn
-            .query_row("SELECT account FROM mailboxes WHERE id = ?1", [mailbox.0], |r| r.get(0))
+            .query_row("SELECT account, role FROM mailboxes WHERE id = ?1", [mailbox.0], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .map_err(db)?;
         let tx = self.conn.transaction().map_err(db)?;
         {
@@ -225,7 +227,14 @@ impl Store {
                         preview = COALESCE(excluded.preview, messages.preview)",
                 )
                 .map_err(db)?;
+            let mut exists = tx
+                .prepare("SELECT 1 FROM messages WHERE mailbox = ?1 AND remote_id = ?2")
+                .map_err(db)?;
             for e in &delta.added {
+                // Learn addresses from new rows only, so flag re-syncs don't inflate counts.
+                if !exists.exists(params![mailbox.0, e.remote_id]).map_err(db)? {
+                    note_contacts(&tx, &role, &e.from, e.to.iter().chain(&e.cc), e.date.timestamp())?;
+                }
                 ins.execute(params![
                     account,
                     mailbox.0,
@@ -651,6 +660,35 @@ impl Store {
             .map_err(db)?;
         Ok(())
     }
+
+    // ----------------------------------------------------------------- contacts
+
+    /// Addresses whose email, or any word of whose name, starts with `prefix`; people the
+    /// user has written to first, then by how often and how recently they were seen.
+    pub fn suggest_addresses(&self, prefix: &str, limit: usize) -> Result<Vec<Address>> {
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT email, name FROM contacts
+                 WHERE email LIKE ?1 || '%' ESCAPE '\\'
+                    OR name LIKE ?1 || '%' ESCAPE '\\'
+                    OR name LIKE '% ' || ?1 || '%' ESCAPE '\\'
+                 ORDER BY sent > 0 DESC, sent * 4 + received DESC, last_seen DESC
+                 LIMIT ?2",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map(params![like, limit as i64], |r| {
+                Ok(Address { email: r.get(0)?, name: r.get(1)? })
+            })
+            .map_err(db)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(db)
+    }
 }
 
 /// Upgrade an existing database from `from` to `SCHEMA_VERSION`, one step at a time.
@@ -658,7 +696,86 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 2 {
         conn.execute_batch("ALTER TABLE outbox ADD COLUMN envelope TEXT;").map_err(db)?;
     }
+    if from < 3 {
+        backfill_contacts(conn)?;
+    }
     Ok(())
+}
+
+/// Learn the addresses of mail cached before the `contacts` table existed.
+fn backfill_contacts(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN").map_err(db)?;
+    let result = (|| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT b.role, m.from_json, m.to_json, m.cc_json, m.date
+                 FROM messages m JOIN mailboxes b ON b.id = m.mailbox",
+            )
+            .map_err(db)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?, r.get::<_, i64>(4)?))
+            })
+            .map_err(db)?;
+        for row in rows {
+            let (role, from, to, cc, date) = row.map_err(db)?;
+            let parse = |j: &str| serde_json::from_str::<Vec<Address>>(j).unwrap_or_default();
+            let (from, to, cc) = (parse(&from), parse(&to), parse(&cc));
+            note_contacts(conn, &role, &from, to.iter().chain(&cc), date)?;
+        }
+        Ok(())
+    })();
+    conn.execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" }).map_err(db)?;
+    result
+}
+
+/// Record the people in a newly stored message: recipients of mail in Sent are people the
+/// user wrote to, senders of mail elsewhere wrote to the user. Drafts, Junk and Trash teach
+/// nothing, so spam and unsent mail never become suggestions.
+fn note_contacts<'a>(
+    conn: &Connection,
+    role: &str,
+    from: &'a [Address],
+    recipients: impl Iterator<Item = &'a Address>,
+    date: i64,
+) -> Result<()> {
+    let (people, sent): (Vec<&Address>, bool) = match role {
+        "sent" => (recipients.collect(), true),
+        "drafts" | "junk" | "trash" => return Ok(()),
+        _ => (from.iter().collect(), false),
+    };
+    let mut up = conn
+        .prepare_cached(
+            "INSERT INTO contacts (email, name, sent, received, last_seen) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (email) DO UPDATE SET
+               sent = sent + excluded.sent,
+               received = received + excluded.received,
+               name = CASE WHEN excluded.name IS NOT NULL AND excluded.last_seen >= last_seen
+                           THEN excluded.name ELSE COALESCE(name, excluded.name) END,
+               last_seen = MAX(last_seen, excluded.last_seen)",
+        )
+        .map_err(db)?;
+    for a in people {
+        let email = a.email.trim();
+        if !email.contains('@') || is_machine_address(email) {
+            continue;
+        }
+        let name = a.name.as_deref().map(str::trim).filter(|n| !n.is_empty() && *n != email);
+        up.execute(params![email, name, sent as i64, !sent as i64, date])
+            .map_err(db)?;
+    }
+    Ok(())
+}
+
+/// Automated senders nobody writes to.
+fn is_machine_address(email: &str) -> bool {
+    let local = email.split('@').next().unwrap_or("").to_ascii_lowercase();
+    ["noreply", "no-reply", "no_reply", "donotreply", "do-not-reply", "do_not_reply", "mailer-daemon", "postmaster"]
+        .contains(&local.as_str())
+        || local.starts_with("bounce")
+        || local.starts_with("noreply")
+        || local.starts_with("no-reply")
 }
 
 /// A queued send.

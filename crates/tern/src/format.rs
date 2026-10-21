@@ -83,13 +83,17 @@ fn push_addr(out: &mut Vec<Address>, raw: &str) -> Result<(), String> {
 }
 
 pub fn format_addresses(list: &[Address]) -> String {
-    list.iter()
-        .map(|a| match &a.name {
-            Some(n) => format!("{n} <{}>", a.email),
-            None => a.email.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+    list.iter().map(format_address).collect::<Vec<_>>().join(", ")
+}
+
+/// `Name <email>`, quoting names with separators so `parse_addresses` reads them back
+/// ("Lee, Cat" would otherwise split into two invalid addresses).
+pub fn format_address(a: &Address) -> String {
+    match &a.name {
+        Some(n) if n.contains([',', ';', '<', '>', '"']) => format!("\"{}\" <{}>", n.replace('"', ""), a.email),
+        Some(n) => format!("{n} <{}>", a.email),
+        None => a.email.clone(),
+    }
 }
 
 /// The document the viewer's WebView loads, plus whether remote content was blocked.
@@ -272,6 +276,9 @@ mod tests {
         assert!(parse_addresses("not an address").is_err());
         assert!(parse_addresses("  ").unwrap().is_empty());
         assert_eq!(format_addresses(&a[..2]), "Ann <ann@x.com>, bob@x.com");
+        // Names with separators round-trip.
+        assert_eq!(parse_addresses(&format_addresses(&a)).unwrap(), a);
+        assert_eq!(format_addresses(&a[2..]), r#""Lee, Cat" <cat@x.com>"#);
     }
 
     fn body(text: Option<&str>, html: Option<&str>) -> MessageBody {

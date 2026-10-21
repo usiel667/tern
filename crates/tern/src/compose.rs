@@ -270,6 +270,28 @@ fn open(ui: &Rc<Ui>, draft: Draft, account: Option<AccountId>, responding: Optio
         toasts,
     });
     refresh_attachments(&c);
+    {
+        // Your own addresses are never suggested as recipients.
+        let own: Vec<String> = ui
+            .accounts
+            .borrow()
+            .iter()
+            .flat_map(|a| [a.identity.email.to_lowercase(), a.username.to_lowercase()])
+            .collect();
+        for entry in [&c.to, &c.cc, &c.bcc] {
+            let (ui2, own) = (ui.clone(), own.clone());
+            let suggest = move |prefix: &str| {
+                ui2.store
+                    .borrow()
+                    .suggest_addresses(prefix, 16)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|a| !own.contains(&a.email.to_lowercase()))
+                    .collect()
+            };
+            crate::autocomplete::attach(entry, &c.window, Box::new(suggest));
+        }
+    }
 
     {
         let row = bcc_row.clone();

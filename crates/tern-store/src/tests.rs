@@ -263,3 +263,99 @@ fn oldest_cached_reports_where_history_ends() {
     s.apply_delta(inbox, &delta).unwrap();
     assert_eq!(s.oldest_cached(inbox).unwrap(), (Some("3".to_string()), 2));
 }
+
+fn mail(rid: &str, from: Address, to: Vec<Address>, hour: u32) -> Envelope {
+    Envelope { from: vec![from], to, ..env(rid, &format!("<{rid}@x>"), None, "s", "x", hour) }
+}
+
+fn emails(a: &[Address]) -> Vec<&str> {
+    a.iter().map(|a| a.email.as_str()).collect()
+}
+
+fn add(s: &mut Store, mb: MailboxId, added: Vec<Envelope>) {
+    s.apply_delta(mb, &MailboxDelta { added, new_state: SyncState("s".into()), ..Default::default() })
+        .unwrap();
+}
+
+#[test]
+fn learns_contacts_by_mailbox_role() {
+    let (mut s, acct, inbox, sent) = setup();
+    let mb = |rid: &str, role| RemoteMailbox {
+        remote_id: rid.into(),
+        name: rid.into(),
+        parent_remote_id: None,
+        role,
+        selectable: true,
+    };
+    s.sync_mailboxes(acct, &[mb("INBOX", MailboxRole::Inbox), mb("Sent", MailboxRole::Sent), mb("Junk", MailboxRole::Junk)])
+        .unwrap();
+    let junk = s.mailboxes(Some(acct)).unwrap().into_iter().find(|m| m.remote.role == MailboxRole::Junk).unwrap().id;
+    let me = Address::new(Some("Tom"), "tom@example.com");
+    add(&mut s, inbox, vec![
+        mail("1", Address::new(Some("Maya Chen"), "maya@example.com"), vec![me.clone()], 1),
+        mail("2", Address::new(None, "noreply@github.com"), vec![me.clone()], 2),
+        mail("3", Address::new(Some("Bounces"), "bounce-123@list.org"), vec![me.clone()], 3),
+    ]);
+    add(&mut s, sent, vec![Envelope {
+        cc: vec![Address::new(Some("Carl Cc"), "carl@example.com")],
+        ..mail("9", me.clone(), vec![Address::new(Some("Nora Work"), "nora@work.com")], 4)
+    }]);
+    add(&mut s, junk, vec![mail("5", Address::new(Some("Deals"), "deals@spam.example"), vec![me.clone()], 5)]);
+
+    assert_eq!(emails(&s.suggest_addresses("maya", 8).unwrap()), ["maya@example.com"]);
+    assert_eq!(emails(&s.suggest_addresses("chen", 8).unwrap()), ["maya@example.com"], "name word");
+    assert_eq!(emails(&s.suggest_addresses("Nor", 8).unwrap()), ["nora@work.com"], "Sent To learned");
+    assert_eq!(emails(&s.suggest_addresses("carl", 8).unwrap()), ["carl@example.com"], "Sent Cc learned");
+    assert!(s.suggest_addresses("deals", 8).unwrap().is_empty(), "Junk ignored");
+    assert!(s.suggest_addresses("noreply", 8).unwrap().is_empty(), "machine sender ignored");
+    assert!(s.suggest_addresses("bounce", 8).unwrap().is_empty());
+    assert!(s.suggest_addresses("tom", 8).unwrap().is_empty(), "recipients of received mail aren't learned");
+    assert!(s.suggest_addresses("", 8).unwrap().is_empty());
+}
+
+#[test]
+fn suggestions_rank_people_you_wrote_to_first() {
+    let (mut s, _, inbox, sent) = setup();
+    let me = Address::new(None, "tom@example.com");
+    let news: Vec<Envelope> = (0..10)
+        .map(|i| mail(&format!("n{i}"), Address::new(Some("Shop News"), "news@shop.com"), vec![me.clone()], 10 + i))
+        .collect();
+    add(&mut s, inbox, news.clone());
+    add(&mut s, sent, vec![mail("s1", me.clone(), vec![Address::new(None, "nora@work.com")], 1)]);
+    assert_eq!(emails(&s.suggest_addresses("n", 8).unwrap()), ["nora@work.com", "news@shop.com"]);
+    // Re-applying the same rows (a flag re-sync) doesn't count them again.
+    add(&mut s, inbox, news);
+    let received: i64 = s.conn.query_row("SELECT received FROM contacts WHERE email = 'news@shop.com'", [], |r| r.get(0)).unwrap();
+    assert_eq!(received, 10);
+}
+
+#[test]
+fn suggestions_take_latest_name_and_literal_wildcards() {
+    let (mut s, _, inbox, _) = setup();
+    let me = Address::new(None, "tom@example.com");
+    add(&mut s, inbox, vec![
+        mail("1", Address::new(Some("Old Name"), "ann@x.org"), vec![me.clone()], 1),
+        mail("2", Address::new(Some("Ann Lee"), "ANN@x.org"), vec![me.clone()], 3),
+        mail("3", Address::new(None, "ann@x.org"), vec![me.clone()], 5),
+        mail("4", Address::new(None, "a_b@x.org"), vec![me.clone()], 2),
+        mail("5", Address::new(None, "axb@x.org"), vec![me.clone()], 2),
+    ]);
+    let ann = s.suggest_addresses("lee", 8).unwrap();
+    assert_eq!(ann.len(), 1, "one row per address, case-insensitive");
+    assert_eq!(ann[0].name.as_deref(), Some("Ann Lee"), "newest name kept; a nameless newer message doesn't erase it");
+    assert_eq!(emails(&s.suggest_addresses("a_", 8).unwrap()), ["a_b@x.org"], "_ is literal");
+    assert!(s.suggest_addresses("%", 8).unwrap().is_empty(), "% is literal");
+}
+
+#[test]
+fn migration_to_v3_learns_cached_mail() {
+    let (mut s, _, inbox, sent) = setup();
+    let me = Address::new(None, "tom@example.com");
+    add(&mut s, inbox, vec![mail("1", Address::new(Some("Maya Chen"), "maya@example.com"), vec![me.clone()], 1)]);
+    add(&mut s, sent, vec![mail("2", me, vec![Address::new(None, "nora@work.com")], 2)]);
+    // Turn it back into a v2 database: no contacts table.
+    s.conn.execute_batch("DROP TABLE contacts; PRAGMA user_version = 2;").unwrap();
+    let s = Store::init(s.conn).unwrap();
+    assert_eq!(emails(&s.suggest_addresses("ch", 8).unwrap()), ["maya@example.com"]);
+    assert_eq!(emails(&s.suggest_addresses("nora", 8).unwrap()), ["nora@work.com"]);
+}

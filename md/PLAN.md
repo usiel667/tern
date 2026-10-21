@@ -117,7 +117,7 @@ Key decisions:
 | Attachments (pick) | ✅ | forward carries originals |
 | Attachments (drag & drop into window) | ⬜ | |
 | Signatures | 🟡 | per-account plain text in accounts.toml; no editor yet |
-| Address autocomplete from history/contacts | ⬜ | query distinct from/to in store |
+| Address autocomplete from history/contacts | ✅ | from cached mail (`contacts` table, schema v3); people you wrote to rank first; no system address book yet |
 | Rich text (bold, lists, fonts) | ⬜ | likely a WebKit contenteditable editor |
 | Save to Drafts / autosave | ⬜ | APPEND to Drafts |
 | Send later, Undo Send | ⬜ | outbox delay makes Undo Send easy |
@@ -153,7 +153,9 @@ Key decisions:
      `HANDLES_OPEN`), desktop file registers `x-scheme-handler/mailto`, RFC 6068 parser
      (literal `+`, repeated recipients, no `attach`); a link's body goes above the signature
      (OpenSpec change `mailto-handler`).
-   - ⬜ Address autocomplete from history.
+   - ✅ Address autocomplete: the engine learns addresses as mail is stored (Sent → To/Cc,
+     elsewhere → From; Drafts/Junk/Trash and noreply-style senders ignored), schema v3
+     backfills cached mail; To/Cc/Bcc show up to 8 suggestions (OpenSpec change `address-autocomplete`).
    - ⬜ Drag-and-drop attachments.
    - ⬜ Save to Drafts / autosave.
    - ⬜ Undo Send (outbox delay).
@@ -173,4 +175,6 @@ Key decisions:
 - Failed sends retry every 5 minutes with no limit, and there's no Outbox view to see or
   cancel them (attempts and last error are recorded in the `outbox` table).
 - Sends queued before schema v2 (milestone 1) still lose Bcc if resumed.
+- Address suggestions can't be removed or edited, and Bcc recipients are only learned if
+  they write back (they're not in the Sent copy).
 - The UI layer has no automated tests yet; `--demo` plus Xvfb screenshots is the current check.

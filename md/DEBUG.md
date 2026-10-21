@@ -13,6 +13,24 @@ dev/test-imap-server.sh start                        # local Dovecot for live te
 eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
 ```
 
+## 2026-10-20 — Autocomplete popover mapped but never drawn
+
+**Saw:** the recipient-suggestion `gtk::Popover` (parented to the To `GtkEntry`) reported
+`is_visible() && is_mapped()` after `popup()` but had a 0×0 size and nothing appeared.
+
+**Cause:** GTK4 only sizes and positions a popover when its parent calls
+`gtk_popover_present()` in `size_allocate`. `GtkEntry` does that for its own popovers
+(emoji chooser, context menu) but not for one you `set_parent()` on it.
+
+**Fix:** call `popover.present()` right after `popup()` (`autocomplete.rs`).
+
+**Also learned while testing:** (1) GTK fires `changed` before moving the cursor, so a
+"cursor at end" check inside `changed` always fails. (2) Under Hyprland, popovers only show
+while their window is focused; `hl.dsp.send_shortcut` types into a window without
+focusing it, so focus it first with `hl.dsp.focus({window='title:…'})`. (3) Demo windows go
+to workspace 8 via the `tern_demo_ws8` rule in `~/.config/hypr/hyprland.lua`; a rule added
+with `hyprctl eval` doesn't take effect, and an exec rule only catches the first window.
+
 ---
 
 ## 2026-10-17 — Unsolicited-response buffer: suspected overflow, not reproduced
