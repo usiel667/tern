@@ -12,12 +12,22 @@ grim -g "X,Y WxH" shot.png                           # screenshot a window (geom
 dev/test-display.sh start                            # private nested Hyprland for UI tests (never steals focus)
 dev/test-display.sh run 'mailto:?subject=x'          # tern --demo inside it (--local-dialogs: file dialogs stay inside)
 dev/test-display.sh type 'x' 'hello'                 # type text into window titled x
-dev/test-display.sh keys 'x' c h Down Return         # focus a window in it by title and press keys
+dev/test-display.sh keys 'x' c h Down Return         # focus the window whose title contains regex x, press keys
 dev/test-display.sh pointer drag 100 800 300 400      # virtual mouse (move/glide/click/down/up/drag)
 dev/test-display.sh shot shot.png                    # screenshot the test display
 dev/test-imap-server.sh start                        # local Dovecot for live tests (target/dovecot)
 eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
 ```
+
+## 2026-10-21 — Test display keys went nowhere
+
+**Saw (testing Undo Send):** `dev/test-display.sh keys 'Tern' CTRL+n` did nothing; nested
+`hyprctl dispatch` printed "hl.focus: window not found" (the script hid its output).
+
+**Cause / fix:** Hyprland's `title:` matches the *whole* title (now "Tern — 3 unread"), and a
+compose window's title follows its subject while typing, so even an exact title went stale
+mid-`type`. `keys` now finds the first window whose title *contains* the regex, then
+addresses it by `address:` for every key.
 
 ## 2026-10-21 — Refused JMAP sends vanished; Ctrl+Return in the body didn't send
 

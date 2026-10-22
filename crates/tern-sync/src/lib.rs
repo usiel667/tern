@@ -124,6 +124,21 @@ fn keeps_op(e: &Error) -> bool {
     matches!(e, Error::Network(_) | Error::Auth(_) | Error::Storage(_))
 }
 
+/// How long to hold a message before sending it, and the key to take it back with.
+#[derive(Debug, Clone)]
+pub struct Hold {
+    pub key: String,
+    pub delay: Duration,
+}
+
+/// A message waiting out its hold: queued in the outbox, not yet dispatched.
+struct Held {
+    outbox_id: i64,
+    account: AccountId,
+    out: tern_smtp::Outgoing,
+    responding_to: Option<(MessageId, FlagChange)>,
+}
+
 #[derive(Debug)]
 pub enum Command {
     /// "Get Mail" (⇧⌘N).
@@ -142,7 +157,11 @@ pub enum Command {
         responding_to: Option<(MessageId, FlagChange)>,
         /// The draft this message was saved as, removed once the message is queued.
         draft_key: Option<String>,
+        /// Wait before sending so the user can take it back (`UndoSend`).
+        hold: Option<Hold>,
     },
+    /// Take back a message still being held (see `Send.hold`); emits `SendUndone`.
+    UndoSend(String),
     /// Save a new version of the message being written under `key` (kept locally, then
     /// uploaded to the account's Drafts mailbox, replacing the previous copy).
     SaveDraft { key: String, account: AccountId, draft: Box<Draft> },
@@ -181,6 +200,10 @@ pub enum Event {
     SendRejected { outbox_id: i64, account: AccountId, subject: String, reason: String },
     /// Rows were added to or removed from the refused list.
     OutboxChanged,
+    /// The held message with this key was taken back and won't be sent.
+    SendUndone(String),
+    /// The held message with this key is on its way; it can no longer be taken back.
+    SendReleased(String),
     Error { account: Option<AccountId>, message: String },
 }
 
@@ -198,6 +221,8 @@ enum Internal {
     SendFailed { outbox_id: i64, account: AccountId, error: Error },
     /// Result of asking the server for its message size limit.
     SendLimit(AccountId, Option<u64>),
+    /// A held message's wait is over.
+    HoldOver(String),
     /// A draft version was appended to a Drafts mailbox (or failed to be).
     DraftUploaded { key: String, account: AccountId, version: i64, copy: ServerCopy, result: Result<Option<String>> },
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
@@ -300,6 +325,8 @@ pub struct Engine {
     in_flight: HashMap<AccountId, usize>,
     /// Outbox rows with a send in flight, so a flush doesn't send them twice.
     sending: std::collections::HashSet<i64>,
+    /// Messages waiting out their Undo Send hold, by hold key.
+    held: HashMap<String, Held>,
     /// Each account's message size limit, when the server told us.
     send_limits: HashMap<AccountId, u64>,
     /// Drafts with an upload in flight (one at a time per draft).
@@ -347,6 +374,7 @@ impl Engine {
             syncing: Default::default(),
             in_flight: Default::default(),
             sending: Default::default(),
+            held: Default::default(),
             send_limits: Default::default(),
             drafts_uploading: Default::default(),
             auth_retry: Default::default(),
@@ -605,8 +633,8 @@ impl Engine {
             Command::FetchBody(id) => self.fetch_body(id),
             Command::SetFlags(ids, change) => self.set_flags(ids, change),
             Command::Move(ids, target) => self.move_messages(ids, target),
-            Command::Send { account, draft, responding_to, draft_key } => {
-                self.send(account, *draft, responding_to);
+            Command::Send { account, draft, responding_to, draft_key, hold } => {
+                self.send(account, *draft, responding_to, hold);
                 // The outbox holds the message now; the draft has done its job.
                 if let Some(key) = draft_key {
                     self.discard_draft(&key);
@@ -615,6 +643,7 @@ impl Engine {
             Command::SaveDraft { key, account, draft } => self.save_draft(key, account, *draft),
             Command::AdoptDraft { key, account, message } => self.adopt_draft(&key, account, message),
             Command::DiscardDraft(key) => self.discard_draft(&key),
+            Command::UndoSend(key) => self.undo_send(key),
             Command::RetrySend(id) => self.retry_send(id),
             Command::DiscardSend(id) => {
                 if let Err(e) = self.store.outbox_done(id) {
@@ -830,7 +859,13 @@ impl Engine {
         });
     }
 
-    fn send(&mut self, account: AccountId, mut draft: Draft, responding_to: Option<(MessageId, FlagChange)>) {
+    fn send(
+        &mut self,
+        account: AccountId,
+        mut draft: Draft,
+        responding_to: Option<(MessageId, FlagChange)>,
+        hold: Option<Hold>,
+    ) {
         let Some(acct) = self.accounts.get(&account) else {
             return self.fail(Some(account), "unknown account");
         };
@@ -849,7 +884,33 @@ impl Engine {
             Ok(id) => id,
             Err(e) => return self.fail(Some(account), e),
         };
-        self.dispatch_outgoing(outbox_id, account, out, responding_to);
+        match hold {
+            Some(Hold { key, delay }) => {
+                self.held.insert(key.clone(), Held { outbox_id, account, out, responding_to });
+                // Not a spawn_task: waiting isn't work in flight (no spinner, `settle` doesn't wait).
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = tx.send(Internal::HoldOver(key));
+                });
+            }
+            None => self.dispatch_outgoing(outbox_id, account, out, responding_to),
+        }
+    }
+
+    fn undo_send(&mut self, key: String) {
+        // Already released: too late, and the UI was told so by `SendReleased`.
+        let Some(h) = self.held.remove(&key) else { return };
+        if let Err(e) = self.store.outbox_done(h.outbox_id) {
+            return self.fail(Some(h.account), e);
+        }
+        self.emit(Event::SendUndone(key));
+    }
+
+    fn release(&mut self, key: String) {
+        let Some(h) = self.held.remove(&key) else { return };
+        self.emit(Event::SendReleased(key));
+        self.dispatch_outgoing(h.outbox_id, h.account, h.out, h.responding_to);
     }
 
     fn dispatch_outgoing(
@@ -918,7 +979,7 @@ impl Engine {
         }
         let Ok(items) = self.store.outbox() else { return };
         for item in items {
-            if self.sending.contains(&item.id) {
+            if self.sending.contains(&item.id) || self.held.values().any(|h| h.outbox_id == item.id) {
                 continue;
             }
             let (id, account) = (item.id, item.account);
@@ -1339,6 +1400,7 @@ impl Engine {
             Internal::DraftUploaded { key, account, version, copy, result } => {
                 self.draft_uploaded(key, account, version, copy, result);
             }
+            Internal::HoldOver(key) => self.release(key),
             Internal::SendLimit(account, bytes) => {
                 match bytes {
                     Some(n) => self.send_limits.insert(account, n),

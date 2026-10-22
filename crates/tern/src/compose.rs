@@ -7,7 +7,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use tern_core::compose::{ReplyKind, respond};
 use tern_core::model::{AccountId, Address, Draft, MessageId, OutgoingAttachment};
-use tern_sync::{Command, FlagChange};
+use tern_sync::{Command, FlagChange, Hold};
 
 use crate::app::Ui;
 use crate::folder_zip::MAX_FOLDER_BYTES;
@@ -15,6 +15,15 @@ use crate::format::{
     crosses_limit, estimated_message_size, format_addresses, human_size, mime_for, parse_addresses, parse_uri_list,
     LARGE_ATTACHMENTS,
 };
+
+/// How long a sent message waits so it can be taken back (Apple Mail's default).
+/// Settings will offer Off / 10 / 20 / 30 seconds.
+const UNDO_SEND_SECS: u32 = 10;
+
+thread_local! {
+    /// Windows of messages being held for Undo Send (hidden), with their notice, by draft key.
+    static HELD: RefCell<std::collections::HashMap<String, (Rc<Compose>, adw::Toast)>> = Default::default();
+}
 
 pub fn open_new(ui: &Rc<Ui>) {
     open(ui, Draft::default(), None, None, true, None);
@@ -159,7 +168,7 @@ struct Compose {
     /// Identifies this message's draft to the engine.
     draft_key: String,
     /// Opened from a Drafts message (that copy is this draft until replaced).
-    from_draft: bool,
+    from_draft: Cell<bool>,
     /// The body as the window opened (signature, quote), to tell real content from none.
     initial_text: String,
     /// Changed since the window opened / since the last save.
@@ -349,7 +358,7 @@ fn open(
         toasts,
         ui: Rc::downgrade(ui),
         draft_key: glib::uuid_string_random().to_string(),
-        from_draft: from_draft.is_some(),
+        from_draft: Cell::new(from_draft.is_some()),
         initial_text: text.clone(),
         edited: Cell::new(false),
         dirty: Cell::new(false),
@@ -542,7 +551,7 @@ fn open(
             }
             let d = adw::AlertDialog::new(
                 Some("Save this message as a draft?"),
-                Some(if c2.from_draft {
+                Some(if c2.from_draft.get() {
                     "Your changes will be kept in Drafts."
                 } else {
                     "It will be kept in Drafts so you can finish it later."
@@ -561,7 +570,7 @@ fn open(
                     "save" => save_now(&c3),
                     // A new message's autosaved draft goes; a reopened draft keeps its last
                     // saved version (it existed before this window).
-                    "discard" if c3.saved.get() && !c3.from_draft => {
+                    "discard" if c3.saved.get() && !c3.from_draft.get() => {
                         if let Some(ui) = c3.ui.upgrade() {
                             ui.send(Command::DiscardDraft(c3.draft_key.clone()));
                         }
@@ -878,8 +887,56 @@ fn do_send(ui: &Rc<Ui>, c: &Rc<Compose>) {
     // The signature is already in the body; don't let the engine add it again.
     stop_autosave(c);
     let draft_key = c.saved.get().then(|| c.draft_key.clone());
-    ui.send(Command::Send { account, draft: Box::new(draft), responding_to: c.responding, draft_key });
+    let mut subject = single_line(draft.subject.trim());
+    if let Some((cut, _)) = subject.char_indices().nth(40) {
+        subject = format!("{}…", subject[..cut].trim_end());
+    }
+    let hold = (UNDO_SEND_SECS > 0)
+        .then(|| Hold { key: c.draft_key.clone(), delay: std::time::Duration::from_secs(UNDO_SEND_SECS.into()) });
+    ui.send(Command::Send { account, draft: Box::new(draft), responding_to: c.responding, draft_key, hold });
     c.window.set_widget_name("sent");
+    if UNDO_SEND_SECS == 0 {
+        c.window.close();
+        return;
+    }
+    // Hidden, not closed: Undo brings it back exactly as it was.
+    c.window.set_visible(false);
+    let title = if subject.is_empty() { "Sending…".to_string() } else { format!("Sending “{subject}”…") };
+    let toast = adw::Toast::builder()
+        .title(glib::markup_escape_text(&title))
+        .button_label("Undo")
+        .timeout(UNDO_SEND_SECS)
+        .build();
+    {
+        let (ui, key) = (Rc::downgrade(ui), c.draft_key.clone());
+        toast.connect_button_clicked(move |_| {
+            if let Some(ui) = ui.upgrade() {
+                ui.send(Command::UndoSend(key.clone()));
+            }
+        });
+    }
+    ui.toasts.add_toast(toast.clone());
+    HELD.with(|h| h.borrow_mut().insert(c.draft_key.clone(), (c.clone(), toast)));
+}
+
+/// The engine took a held message back: reopen its window.
+pub fn send_undone(key: &str) {
+    let Some((c, _)) = HELD.with(|h| h.borrow_mut().remove(key)) else { return };
+    // The engine removed its draft when the message was queued; it's a new draft now.
+    c.window.set_widget_name("");
+    c.from_draft.set(false);
+    c.saved.set(false);
+    c.edited.set(true);
+    c.dirty.set(true);
+    autosave(&c);
+    c.window.present();
+    c.toasts.add_toast(adw::Toast::new("Not sent — saved to Drafts"));
+}
+
+/// A held message is on its way: its window goes for good.
+pub fn send_released(key: &str) {
+    let Some((c, toast)) = HELD.with(|h| h.borrow_mut().remove(key)) else { return };
+    toast.dismiss();
     c.window.close();
 }
 

@@ -120,7 +120,8 @@ Key decisions:
 | Address autocomplete from history/contacts | ✅ | from cached mail (`contacts` table, schema v3); people you wrote to rank first; no system address book yet |
 | Rich text (bold, lists, fonts) | ⬜ | likely a WebKit contenteditable editor |
 | Save to Drafts / autosave | ✅ | local first (schema v5), then APPEND to Drafts replacing the previous copy; 4 s pause / 30 s while typing, Ctrl+S; close asks Save / Don't Save / Cancel; Edit Draft banner + Return/double-click; Bcc kept |
-| Send later, Undo Send | ⬜ | outbox delay makes Undo Send easy |
+| Undo Send | ✅ | held 10 s in the outbox (engine timer); Undo reopens the same window and re-saves the draft; a hold interrupted by quitting sends on next start; delay setting comes with Settings |
+| Send later | ⬜ | scheduled send; the hold mechanism is a start |
 | Sent copy filed in Sent | ✅ | skipped for Gmail (server does it) |
 | Server size limits | ✅ | SMTP `SIZE` / JMAP `maxSizeUpload` per account; exact check on Send, estimate while attaching |
 | Refused sends (Unsent Messages) | ✅ | not retried; Edit / Try Again / Delete; JMAP `notCreated` no longer counts as sent |
@@ -175,12 +176,14 @@ Key decisions:
      the account's Drafts mailbox replacing the previous copy (IMAP finds the new UID by
      Message-ID); sending or Don't Save removes them; drafts from other apps open for editing
      (OpenSpec change `drafts-autosave`).
-   - ⬜ Undo Send (outbox delay).
+   - ✅ Undo Send: Send waits 10 seconds with an Undo toast; Undo brings the window back as
+     it was (OpenSpec change `undo-send`).
    - ⬜ Signature editor.
 4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
 5. **Reading polish:** full stacked conversation view, open-in-window, print, view source,
    RFC 8058 one-click unsubscribe, Quick Look via xdg-open.
-6. **Settings + packaging:** Preferences window (incl. optional Vim key bindings and themes),
+6. **Settings + packaging:** Preferences window (incl. optional Vim key bindings, themes, and
+   the Undo Send delay: Off / 10 / 20 / 30 s),
    AUR package, Flatpak manifest.
 
 ## Known gaps worth knowing now

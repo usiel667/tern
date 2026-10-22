@@ -286,7 +286,9 @@ async fn send_reply_submits_and_marks_answered() {
     engine.handle(Command::Send {
         account: id,
         draft: Box::new(draft),
-        draft_key: None, responding_to: Some((orig.id, FlagChange::Answered)),
+        responding_to: Some((orig.id, FlagChange::Answered)),
+        draft_key: None,
+        hold: None,
     });
     engine.settle().await;
     assert!(fake.log.lock().unwrap().iter().any(|l| l.contains("submit tom@x.com") && l.contains("ann@x.com")));
@@ -327,7 +329,7 @@ fn submits(fake: &Fake) -> Vec<String> {
 async fn offline_send_keeps_bcc_when_retried() {
     let (mut engine, fake, _rx, id) = setup().await;
     *fake.offline.lock().unwrap() = true;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None, hold: None });
     engine.settle().await;
     let queued = engine.store().outbox().unwrap();
     assert_eq!(queued.len(), 1, "failed send stays queued");
@@ -345,7 +347,7 @@ async fn offline_send_keeps_bcc_when_retried() {
 #[tokio::test]
 async fn flush_during_send_does_not_send_twice() {
     let (mut engine, fake, _rx, id) = setup().await;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None, hold: None });
     // The periodic flush fires while the send is still in flight.
     engine.flush_outbox();
     engine.settle().await;
@@ -760,7 +762,7 @@ async fn refused_send_is_kept_and_not_retried() {
     *fake.refuse_submit.lock().unwrap() = true;
     let mut draft = draft_with_bcc();
     draft.subject = "Big report".into();
-    engine.handle(Command::Send { account: id, draft: Box::new(draft), responding_to: None, draft_key: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft), responding_to: None, draft_key: None, hold: None });
     engine.settle().await;
 
     assert!(engine.store().outbox().unwrap().is_empty(), "no longer queued");
@@ -792,7 +794,7 @@ async fn refused_send_is_kept_and_not_retried() {
 async fn refused_send_can_be_discarded() {
     let (mut engine, fake, _rx, id) = setup().await;
     *fake.refuse_submit.lock().unwrap() = true;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None, hold: None });
     engine.settle().await;
     let refused = engine.store().outbox_rejected().unwrap();
     engine.handle(Command::DiscardSend(refused[0].id));
@@ -810,7 +812,7 @@ async fn over_the_limit_is_refused_without_uploading() {
         events(&rx).iter().any(|e| matches!(e, Event::SendLimit { bytes: Some(100), .. })),
         "the UI hears about the limit"
     );
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None, hold: None });
     engine.settle().await;
     assert!(submits(&fake).is_empty(), "never sent to the server");
     let refused = engine.store().outbox_rejected().unwrap();
@@ -821,7 +823,7 @@ async fn over_the_limit_is_refused_without_uploading() {
 async fn network_failure_still_retries() {
     let (mut engine, fake, _rx, id) = setup().await;
     *fake.offline.lock().unwrap() = true;
-    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None });
+    engine.handle(Command::Send { account: id, draft: Box::new(draft_with_bcc()), responding_to: None, draft_key: None, hold: None });
     engine.settle().await;
     assert_eq!(engine.store().outbox().unwrap().len(), 1, "still queued");
     assert!(engine.store().outbox_rejected().unwrap().is_empty());
@@ -873,7 +875,7 @@ async fn sending_or_discarding_removes_the_draft() {
     engine.settle().await;
     assert_eq!(server_drafts(&fake).len(), 2);
 
-    engine.handle(Command::Send { account: id, draft: draft("To send"), responding_to: None, draft_key: Some("a".into()) });
+    engine.handle(Command::Send { account: id, draft: draft("To send"), responding_to: None, draft_key: Some("a".into()), hold: None });
     engine.handle(Command::DiscardDraft("b".into()));
     engine.settle().await;
     assert!(server_drafts(&fake).is_empty(), "{:?}", server_drafts(&fake));
@@ -919,7 +921,7 @@ async fn editing_a_server_draft_replaces_it() {
     let list = engine.store().list(&tern_store::ListScope::Mailbox(drafts_mb), false, 5).unwrap();
     let as_is = list.iter().find(|m| m.envelope.subject == "Send as is").unwrap().id;
     engine.handle(Command::AdoptDraft { key: "k2".into(), account: id, message: as_is });
-    engine.handle(Command::Send { account: id, draft: draft("Send as is"), responding_to: None, draft_key: Some("k2".into()) });
+    engine.handle(Command::Send { account: id, draft: draft("Send as is"), responding_to: None, draft_key: Some("k2".into()), hold: None });
     engine.settle().await;
     assert_eq!(server_drafts(&fake), ["Edited here"]);
 }
@@ -949,4 +951,66 @@ async fn reopening_a_saved_draft_leaves_no_stale_entry() {
     engine.settle().await;
     assert!(engine.store().draft("first").unwrap().is_none(), "the closed window's entry is gone");
     assert_eq!(server_drafts(&fake), ["Plan, edited"]);
+}
+
+fn held_send(id: AccountId, key: &str, responding_to: Option<(MessageId, FlagChange)>) -> Command {
+    Command::Send {
+        account: id,
+        draft: Box::new(draft_with_bcc()),
+        responding_to,
+        draft_key: None,
+        hold: Some(Hold { key: key.into(), delay: Duration::from_secs(10) }),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn undo_send_takes_a_held_message_back() {
+    let (mut engine, fake, rx, id) = setup().await;
+    engine.handle(held_send(id, "w1", None));
+    engine.settle().await;
+    assert!(submits(&fake).is_empty(), "held, not sent yet");
+    assert_eq!(engine.store().outbox().unwrap().len(), 1, "queued so a crash doesn't lose it");
+    engine.flush_outbox();
+    engine.settle().await;
+    assert!(submits(&fake).is_empty(), "the flush leaves held messages alone");
+
+    engine.handle(Command::UndoSend("w1".into()));
+    assert!(engine.store().outbox().unwrap().is_empty());
+    run_for(&mut engine, Duration::from_secs(15)).await;
+    assert!(submits(&fake).is_empty(), "never sent");
+    let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|e| matches!(e, Event::SendUndone(k) if k == "w1")));
+    assert!(!events.iter().any(|e| matches!(e, Event::SendReleased(_) | Event::Sent)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_message_is_sent_when_the_hold_ends() {
+    let (mut engine, fake, rx, id) = setup().await;
+    let orig = engine.store().list(&ListScope::Mailbox(inbox(&engine, id)), false, 50).unwrap()[0].id;
+    engine.handle(held_send(id, "w2", Some((orig, FlagChange::Answered))));
+    run_for(&mut engine, Duration::from_secs(5)).await;
+    assert!(submits(&fake).is_empty());
+    run_for(&mut engine, Duration::from_secs(10)).await;
+    assert_eq!(submits(&fake).len(), 1);
+    assert!(engine.store().outbox().unwrap().is_empty());
+    assert!(engine.store().message(orig).unwrap().envelope.flags.answered, "reply flag survives the hold");
+    let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|e| matches!(e, Event::SendReleased(k) if k == "w2")));
+
+    // Too late to undo: nothing happens.
+    engine.handle(Command::UndoSend("w2".into()));
+    assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, Event::SendUndone(_))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn message_held_when_tern_quit_is_sent_on_next_start() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    engine.handle(held_send(id, "w3", None));
+    engine.settle().await;
+    assert!(submits(&fake).is_empty());
+    // The next start: the outbox row is still there, the in-memory hold isn't.
+    engine.held.clear();
+    engine.flush_outbox();
+    engine.settle().await;
+    assert_eq!(submits(&fake).len(), 1);
 }

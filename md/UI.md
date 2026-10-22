@@ -32,6 +32,9 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
+- **2026-10-21 — Undo Send:** Send closes the window and shows "Sending “Subject”…" with
+  **Undo** for 10 seconds (Apple Mail's default), then "Message sent". Undo reopens the same
+  window with "Not sent — saved to Drafts". Long subjects are cut at 40 characters.
 - **2026-10-21 — Drafts:** autosave (no indicator, like Apple Mail); Ctrl+S shows "Saved to
   Drafts". Closing asks "Save this message as a draft?" with Save (default) / Cancel /
   Don't Save (red). Messages in a Drafts mailbox show a "This message is a draft." banner

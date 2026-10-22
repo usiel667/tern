@@ -7,7 +7,8 @@
 #                                             # (re)start `tern --demo [args]` inside it;
 #                                             # --local-dialogs keeps file dialogs in the test
 #                                             # display (no portal), at the cost of desktop theming
-#   dev/test-display.sh keys TITLE KEY…       # focus window TITLE (Lua pattern) and press keys
+#   dev/test-display.sh keys TITLE KEY…       # focus the window whose title contains TITLE
+#                                             # (a Python regex, searched) and press keys
 #   dev/test-display.sh type TITLE TEXT       # type TEXT (letters, digits, common punctuation)
 #   dev/test-display.sh pointer CMD…          # virtual mouse: move X Y | glide X Y | click |
 #                                             #   down | up | sleep MS | drag X1 Y1 X2 Y2
@@ -101,7 +102,13 @@ LUA
     keys)
         title="$2"; shift 2
         need
-        win="window='title:$title'"
+        # Resolve the window once and address it directly: Hyprland's title: rule must match
+        # the whole title, and a compose window's title follows its subject as you type.
+        addr=$(HYPRLAND_INSTANCE_SIGNATURE="$SIG" hyprctl clients -j | TITLE="$title" python3 -c "import json,os,re,sys
+for c in json.load(sys.stdin):
+    if re.search(os.environ['TITLE'], c['title']): print(c['address']); break
+else: sys.exit(1)") || { echo "no window with a title matching '$title'" >&2; exit 1; }
+        win="window='address:$addr'"
         HYPRLAND_INSTANCE_SIGNATURE="$SIG" hyprctl dispatch "hl.dsp.focus({$win})" >/dev/null
         for k in "$@"; do
             mods=""; key="$k"

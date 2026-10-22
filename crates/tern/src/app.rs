@@ -373,6 +373,8 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
             ui.toast_review(&format!("Couldn’t send {subject}: {reason}"));
         }
         Event::OutboxChanged => crate::outbox::refresh(ui),
+        Event::SendUndone(key) => compose::send_undone(&key),
+        Event::SendReleased(key) => compose::send_released(&key),
         Event::Error { account, message } => {
             let prefix = account
                 .and_then(|a| ui.account_for(a))
