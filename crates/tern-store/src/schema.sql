@@ -9,6 +9,12 @@ CREATE TABLE IF NOT EXISTS mailboxes (
     role          TEXT    NOT NULL,
     selectable    INTEGER NOT NULL DEFAULT 1,
     sync_state    TEXT,
+    -- The server's counts for the whole mailbox (NULL: unknown, use the cache's), and the
+    -- cache's own counts when they were taken; shown = server + (cache now - cache then).
+    server_total  INTEGER,
+    server_unread INTEGER,
+    base_total    INTEGER,
+    base_unread   INTEGER,
     UNIQUE (account, remote_id)
 );
 

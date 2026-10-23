@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use tern_auth::Credential;
 use tern_core::account::ServerConfig;
-use tern_core::backend::{MailBackend, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
+use tern_core::backend::{MailBackend, MailboxCounts, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
 use tern_core::mime::{body_from_raw, envelope_from_parts};
 use tern_core::model::{Envelope, Flags, MailboxRole, MessageBody, RemoteMailbox};
 use tern_core::{Error, Result};
@@ -329,6 +329,13 @@ impl MailBackend for ImapBackend {
         self.with_conn(async |c| {
             let ext = c.ext;
             let s = &mut c.session;
+            // Counts for the whole mailbox (only part of it is cached). Asked before SELECT,
+            // since STATUS on the selected mailbox is discouraged; a failure just means none.
+            let counts = s
+                .status(mailbox, "(MESSAGES UNSEEN)")
+                .await
+                .ok()
+                .and_then(|st| Some(MailboxCounts { total: st.exists, unread: st.unseen? }));
             let mb = if ext.condstore { s.select_condstore(mailbox).await } else { s.select(mailbox).await }
                 .map_err(cmd)?;
             let validity = mb.uid_validity.unwrap_or(0);
@@ -339,6 +346,7 @@ impl MailBackend for ImapBackend {
             let prev = since.and_then(|st| ImapState::decode(&st.0));
             let mut delta = MailboxDelta {
                 ids_invalidated: prev.as_ref().is_some_and(|p| p.uid_validity != validity),
+                counts,
                 ..Default::default()
             };
 

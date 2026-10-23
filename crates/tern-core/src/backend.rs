@@ -37,6 +37,16 @@ pub struct MailboxDelta {
     /// client asked for by dropping its own cursor.
     pub ids_invalidated: bool,
     pub new_state: SyncState,
+    /// The mailbox's counts as the server reports them, taken with this sync. `None` when
+    /// the backend can't tell (or didn't ask, e.g. for a batch of older mail).
+    pub counts: Option<MailboxCounts>,
+}
+
+/// Message and unread counts for a whole mailbox, including mail not downloaded yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MailboxCounts {
+    pub total: u32,
+    pub unread: u32,
 }
 
 /// Where the cached part of a mailbox ends, for [`MailBackend::fetch_older`].

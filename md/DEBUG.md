@@ -37,8 +37,15 @@ spans mailboxes (list, thread, search, new `Store::count`), preferring a real ma
 All Mail / Important / Starred; conversation size counts distinct Message-IDs. Messages
 without a Message-ID always count. Test: `gmail_copies_count_once`.
 
-**Still open:** unread counts come from the cache, which holds only the newest 1000 messages
-per mailbox at first (934 vs Gmail's 4,832). Next: server counts (IMAP STATUS / JMAP).
+**Then:** unread counts came from the cache, which holds only the newest 1000 messages per
+mailbox at first (934 vs Gmail's 4,832). Fixed by server counts (OpenSpec
+`server-mailbox-counts`): IMAP `STATUS (MESSAGES UNSEEN)` before each sync's SELECT, JMAP
+`Mailbox/get`; shown = server + (cache now − cache at the snapshot), older batches move the
+snapshot.
+
+**Also measured:** the long-session live test took 34 min on Gmail (~2.8 s per sync +
+body fetch pair): every command re-SELECTs its mailbox, and Gmail's SELECT is slow. Opening a
+message pays that too. Next: skip SELECT when the mailbox is already selected.
 
 ## 2026-10-22 — Live tests against real Gmail
 

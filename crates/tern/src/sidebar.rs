@@ -75,7 +75,19 @@ impl Sidebar {
         };
         // Counted by the store so a message in several mailboxes (Gmail's All Mail) counts once.
         let flagged = ui.store.borrow().count(&ListScope::Flagged).unwrap_or(0);
-        let unread_total = ui.store.borrow().count(&ListScope::Unread).unwrap_or(0);
+        // The server's unread counts (most mail isn't downloaded). An account with All Mail
+        // (Gmail) counts each message there once; others add up their mailboxes.
+        let mut unread_total = 0;
+        for account in mailboxes.iter().map(|m| m.account).collect::<std::collections::BTreeSet<_>>() {
+            let own = || mailboxes.iter().filter(move |m| m.account == account);
+            unread_total += match own().find(|m| m.remote.role == MailboxRole::All) {
+                Some(all) => all.unread,
+                None => own()
+                    .filter(|m| !matches!(m.remote.role, MailboxRole::Trash | MailboxRole::Junk))
+                    .map(|m| m.unread)
+                    .sum(),
+            };
+        }
 
         self.section("Favorites");
         self.item(0, "tern-inbox-symbolic", "All Inboxes", sum(MailboxRole::Inbox, true), Some(ListScope::Role(MailboxRole::Inbox)), None);

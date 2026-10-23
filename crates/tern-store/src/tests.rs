@@ -485,3 +485,60 @@ fn gmail_copies_count_once() {
     // All Mail on its own still lists its messages.
     assert_eq!(s.list(&ListScope::Mailbox(all), false, 50).unwrap().len(), 2);
 }
+
+#[test]
+fn mailbox_counts_follow_the_server() {
+    let (mut s, acct, inbox, _) = setup();
+    let counts = |s: &Store| {
+        let b = s.mailboxes(Some(acct)).unwrap().into_iter().find(|m| m.id == inbox).unwrap();
+        (b.unread, b.total)
+    };
+    let unread = |rid: &str, hour| env(rid, &format!("<{rid}@x>"), None, "Hi", "Ann", hour);
+    // The newest 2 of 5,000 messages are cached; the server says 4,832 are unread.
+    let server = |total, unread| Some(MailboxCounts { total, unread });
+    s.apply_delta(
+        inbox,
+        &MailboxDelta { added: vec![unread("9", 9), unread("10", 10)], full_resync: true, counts: server(5000, 4832), ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(counts(&s), (4832, 5000));
+
+    // Reading one in Tern lowers the badge before the server hears of it.
+    let id = s.list(&ListScope::Mailbox(inbox), false, 10).unwrap()[0].id;
+    s.set_flags(id, &Flags { seen: true, ..Default::default() }).unwrap();
+    assert_eq!(counts(&s), (4831, 5000));
+
+    // Older mail the server already counted doesn't change anything.
+    s.apply_delta(inbox, &MailboxDelta { added: vec![unread("3", 3), unread("4", 4)], ..Default::default() })
+        .unwrap();
+    assert_eq!(counts(&s), (4831, 5000));
+
+    // Deleting locally lowers both; the next sync's counts take over again.
+    s.delete_local(&[id]).unwrap();
+    assert_eq!(counts(&s), (4831, 4999));
+    s.apply_delta(inbox, &MailboxDelta { counts: server(4999, 4830), ..Default::default() }).unwrap();
+    assert_eq!(counts(&s), (4830, 4999));
+}
+
+#[test]
+fn mailbox_counts_fall_back_to_the_cache() {
+    let (mut s, acct, inbox, _) = setup();
+    s.apply_delta(inbox, &MailboxDelta { added: vec![env("1", "<a@x>", None, "Hi", "Ann", 1)], ..Default::default() })
+        .unwrap();
+    let b = s.mailboxes(Some(acct)).unwrap().into_iter().find(|m| m.id == inbox).unwrap();
+    assert_eq!((b.unread, b.total), (1, 1), "no server counts yet: the cache's");
+}
+
+#[test]
+fn migrates_v5_mailboxes_to_v6() {
+    let (s, acct, _, _) = setup();
+    s.conn
+        .execute_batch(
+            "ALTER TABLE mailboxes DROP COLUMN server_total; ALTER TABLE mailboxes DROP COLUMN server_unread;
+             ALTER TABLE mailboxes DROP COLUMN base_total; ALTER TABLE mailboxes DROP COLUMN base_unread;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+    let s = Store::init(s.conn).unwrap();
+    assert_eq!(s.mailboxes(Some(acct)).unwrap().len(), 2);
+}

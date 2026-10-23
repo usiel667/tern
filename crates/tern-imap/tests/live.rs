@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use tern_auth::Credential;
 use tern_core::account::{Security, ServerConfig};
-use tern_core::backend::{MailBackend, OlderFrom, PushEvent};
+use tern_core::backend::{MailBackend, MailboxCounts, OlderFrom, PushEvent};
 use tern_core::model::{FlagColor, Flags, MailboxRole};
 use tern_imap::{Extensions, ImapBackend};
 
@@ -85,6 +85,7 @@ async fn full_cycle() {
     let d1 = b.sync_mailbox(&inbox, None, Some(1000)).await.unwrap();
     assert!(d1.full_resync);
     assert_eq!(d1.added.len(), 3);
+    assert_eq!(d1.counts, Some(MailboxCounts { total: 3, unread: 2 }), "STATUS counts");
     let first = &d1.added[0];
     assert_eq!(first.subject, "Live 1");
     assert!(first.flags.seen);

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tern_core::backend::{MailBackend, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
+use tern_core::backend::{MailBackend, MailboxCounts, MailboxDelta, OlderBatch, OlderFrom, PushEvent, SyncState};
 use tern_core::mime::body_from_raw;
 use tern_core::model::{Address, Envelope, Flags, MailboxRole, MessageBody, RemoteMailbox};
 use tern_core::{Error, Result};
@@ -287,6 +287,7 @@ impl MailBackend for JmapBackend {
                         "#ids": { "resultOf": "c0", "name": "Email/changes", "path": "/created" },
                         "properties": EMAIL_PROPS,
                     })),
+                    counts_call(&account, mailbox),
                 ])
                 .await;
             match r {
@@ -307,6 +308,7 @@ impl MailBackend for JmapBackend {
                     }
                     // If hasMoreChanges, the next sync picks up from newState.
                     delta.new_state = SyncState(changes["newState"].as_str().unwrap_or_default().into());
+                    delta.counts = counts_of(&r[3]);
                     return Ok(delta);
                 }
                 // cannotCalculateChanges: fall through to a full resync.
@@ -329,10 +331,12 @@ impl MailBackend for JmapBackend {
                     "#ids": { "resultOf": "c0", "name": "Email/query", "path": "/ids" },
                     "properties": EMAIL_PROPS,
                 })),
+                counts_call(&account, mailbox),
             ])
             .await?;
         delta.added = r[1]["list"].as_array().into_iter().flatten().filter_map(envelope_of).collect();
         delta.new_state = SyncState(r[1]["state"].as_str().unwrap_or_default().into());
+        delta.counts = counts_of(&r[2]);
         Ok(delta)
     }
 
@@ -543,6 +547,19 @@ fn older_more(query: &Value) -> bool {
     let position = query["position"].as_u64().unwrap_or(0);
     let returned = query["ids"].as_array().map_or(0, |ids| ids.len() as u64);
     query["total"].as_u64().is_some_and(|total| position + returned < total)
+}
+
+/// `Mailbox/get` for one mailbox's counts, to add to a sync request.
+fn counts_call<'a>(account: &str, mailbox: &str) -> (&'a str, Value) {
+    ("Mailbox/get", json!({ "accountId": account, "ids": [mailbox], "properties": ["totalEmails", "unreadEmails"] }))
+}
+
+fn counts_of(response: &Value) -> Option<MailboxCounts> {
+    let m = &response["list"][0];
+    Some(MailboxCounts {
+        total: m["totalEmails"].as_u64()?.try_into().ok()?,
+        unread: m["unreadEmails"].as_u64()?.try_into().ok()?,
+    })
 }
 
 #[cfg(test)]

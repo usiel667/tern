@@ -190,7 +190,10 @@ Key decisions:
 
 ## Known gaps worth knowing now
 
-- First launch syncs every mailbox's newest 1000 messages; very large accounts will take a while.
+- First launch syncs every mailbox's newest 1000 messages (older mail loads as you scroll);
+  unread/total badges still show the server's full counts.
+- Every IMAP command re-SELECTs its mailbox; on Gmail that costs ~1–3 s per message opened.
+- The Flagged badge counts only downloaded mail (IMAP has no cheap server-wide flagged count).
 - IMAP servers without CONDSTORE still fetch FLAGS for the whole cached UID window on every
   sync, so loading a lot of older mail makes their syncs heavier.
 - "Nothing older" is remembered per session only; after a restart the first scroll to the end asks again.

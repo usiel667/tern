@@ -9,14 +9,14 @@ use std::path::Path;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde_json::json;
-use tern_core::backend::{MailboxDelta, SyncState};
+use tern_core::backend::{MailboxCounts, MailboxDelta, SyncState};
 use tern_core::model::*;
 use tern_core::search::SearchQuery;
 use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub struct Store {
     conn: Connection,
@@ -141,7 +141,10 @@ impl Store {
             .conn
             .prepare(
                 "SELECT b.id, b.account, b.remote_id, b.name, b.parent_remote, b.role, b.selectable,
-                        COALESCE(SUM(m.seen = 0), 0), COUNT(m.id)
+                        CASE WHEN b.server_unread IS NULL THEN COALESCE(SUM(m.seen = 0), 0)
+                             ELSE MAX(0, b.server_unread + COALESCE(SUM(m.seen = 0), 0) - b.base_unread) END,
+                        CASE WHEN b.server_total IS NULL THEN COUNT(m.id)
+                             ELSE MAX(0, b.server_total + COUNT(m.id) - b.base_total) END
                  FROM mailboxes b LEFT JOIN messages m ON m.mailbox = b.id
                  WHERE (?1 IS NULL OR b.account = ?1)
                  GROUP BY b.id",
@@ -230,6 +233,7 @@ impl Store {
             })
             .map_err(db)?;
         let tx = self.conn.transaction().map_err(db)?;
+        let cached_before = cached_counts(&tx, mailbox)?;
         {
             if delta.full_resync {
                 tx.execute("DELETE FROM messages WHERE mailbox = ?1", [mailbox.0])
@@ -323,6 +327,27 @@ impl Store {
                 "UPDATE mailboxes SET sync_state = ?2 WHERE id = ?1",
                 params![mailbox.0, delta.new_state.0],
             )
+            .map_err(db)?;
+            let cached = cached_counts(&tx, mailbox)?;
+            match delta.counts {
+                // Fresh server counts: they and the cache describe the same moment.
+                Some(MailboxCounts { total, unread }) => tx.execute(
+                    "UPDATE mailboxes SET server_total = ?2, server_unread = ?3, base_total = ?4, base_unread = ?5
+                     WHERE id = ?1",
+                    params![mailbox.0, total, unread, cached.total, cached.unread],
+                ),
+                // No counts (older mail, or the server didn't say): whatever this changed in
+                // the cache the server had already counted, so the shown counts stay put.
+                None => tx.execute(
+                    "UPDATE mailboxes SET base_total = base_total + ?2, base_unread = base_unread + ?3
+                     WHERE id = ?1 AND server_total IS NOT NULL",
+                    params![
+                        mailbox.0,
+                        i64::from(cached.total) - i64::from(cached_before.total),
+                        i64::from(cached.unread) - i64::from(cached_before.unread)
+                    ],
+                ),
+            }
             .map_err(db)?;
         }
         tx.commit().map_err(db)?;
@@ -863,7 +888,22 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         add_column(conn, "outbox", "rejected", "INTEGER NOT NULL DEFAULT 0")?;
     }
     // v5 only adds the `drafts` table, which SCHEMA creates.
+    if from < 6 {
+        for column in ["server_total", "server_unread", "base_total", "base_unread"] {
+            add_column(conn, "mailboxes", column, "INTEGER")?;
+        }
+    }
     Ok(())
+}
+
+/// How many messages of a mailbox are cached, and how many of those are unread.
+fn cached_counts(conn: &Connection, mailbox: MailboxId) -> Result<MailboxCounts> {
+    conn.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(seen = 0), 0) FROM messages WHERE mailbox = ?1",
+        [mailbox.0],
+        |r| Ok(MailboxCounts { total: r.get(0)?, unread: r.get(1)? }),
+    )
+    .map_err(db)
 }
 
 /// `ALTER TABLE … ADD COLUMN` unless the column is already there (a half-finished upgrade
