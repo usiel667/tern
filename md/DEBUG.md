@@ -8,6 +8,7 @@ Handy commands:
 ```sh
 RUST_LOG=tern_sync=debug,tern_imap=debug cargo run   # verbose sync logging
 cargo run -- --demo                                  # fake account, no network/keyring
+dev/run-tern.sh                                      # your real Tern; restarts itself after each cargo build --release -p tern
 grim -g "X,Y WxH" shot.png                           # screenshot a window (geometry from hyprctl clients -j)
 dev/test-display.sh start                            # private nested Hyprland for UI tests (never steals focus)
 dev/test-display.sh run 'mailto:?subject=x'          # tern --demo inside it (--local-dialogs: file dialogs stay inside)
