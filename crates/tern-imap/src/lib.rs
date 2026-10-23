@@ -86,6 +86,39 @@ impl ImapBackend {
         *self.cmd.lock().await = None;
     }
 
+    /// Read-only export: every message in `mailbox` as raw RFC 822 bytes, oldest UID first,
+    /// fetched `batch` at a time and handed to `each(uid, raw)`. EXAMINE and BODY.PEEK leave
+    /// the server untouched (nothing marked read). Returns how many messages there were.
+    pub async fn export_raw(
+        &self,
+        mailbox: &str,
+        batch: usize,
+        mut each: impl FnMut(u32, &[u8]) -> Result<()>,
+    ) -> Result<usize> {
+        self.with_session(async |s| {
+            s.examine(mailbox).await.map_err(cmd)?;
+            let mut uids: Vec<u32> = s.uid_search("ALL").await.map_err(cmd)?.into_iter().collect();
+            uids.sort_unstable();
+            for chunk in uids.chunks(batch.max(1)) {
+                let set = chunk.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                let fetches: Vec<Fetch> = s
+                    .uid_fetch(&set, "(UID BODY.PEEK[])")
+                    .await
+                    .map_err(cmd)?
+                    .try_collect()
+                    .await
+                    .map_err(cmd)?;
+                for f in &fetches {
+                    if let (Some(uid), Some(raw)) = (f.uid, f.body()) {
+                        each(uid, raw)?;
+                    }
+                }
+            }
+            Ok(uids.len())
+        })
+        .await
+    }
+
     /// Test hook: the change-tracking extensions the current connection uses (what the
     /// server offers, within `limit_extensions`). `NONE` before the first command.
     #[doc(hidden)]
@@ -149,9 +182,11 @@ impl ImapBackend {
     }
 }
 
-fn role_for(name: &str, attrs: &[NameAttribute<'_>]) -> MailboxRole {
+/// A mailbox's role, and whether the server said so (SPECIAL-USE) rather than us guessing
+/// from its name.
+fn role_for(name: &str, attrs: &[NameAttribute<'_>]) -> (MailboxRole, bool) {
     if name.eq_ignore_ascii_case("INBOX") {
-        return MailboxRole::Inbox;
+        return (MailboxRole::Inbox, true);
     }
     for a in attrs {
         let role = match a {
@@ -167,17 +202,33 @@ fn role_for(name: &str, attrs: &[NameAttribute<'_>]) -> MailboxRole {
             }
             _ => continue,
         };
-        return role;
+        return (role, true);
     }
     // Servers without SPECIAL-USE: guess from common names, as Apple Mail does.
     let leaf = name.rsplit(['/', '.']).next().unwrap_or(name).to_ascii_lowercase();
-    match leaf.as_str() {
+    let role = match leaf.as_str() {
         "drafts" => MailboxRole::Drafts,
         "sent" | "sent items" | "sent messages" | "sent mail" => MailboxRole::Sent,
         "junk" | "spam" | "junk e-mail" => MailboxRole::Junk,
         "trash" | "deleted items" | "deleted messages" | "bin" => MailboxRole::Trash,
         "archive" | "archives" => MailboxRole::Archive,
         _ => MailboxRole::Custom,
+    };
+    (role, false)
+}
+
+/// Keep at most one mailbox per role: the one the server marked, else the first name match.
+/// The rest become ordinary folders. (Gmail marks `[Gmail]/Sent Mail` and may also have old
+/// labels called "Sent Messages" or "Trash" from a phone set up years ago; sending and
+/// deleting must go to the marked one.)
+fn one_per_role(boxes: &mut [RemoteMailbox], marked: &[bool]) {
+    let mut seen = std::collections::HashSet::new();
+    let order = (0..boxes.len()).filter(|&i| marked[i]).chain((0..boxes.len()).filter(|&i| !marked[i]));
+    for i in order.collect::<Vec<_>>() {
+        let role = boxes[i].role;
+        if role != MailboxRole::Custom && !seen.insert(role) {
+            boxes[i].role = MailboxRole::Custom;
+        }
     }
 }
 
@@ -295,7 +346,8 @@ impl MailBackend for ImapBackend {
                 .try_collect()
                 .await
                 .map_err(cmd)?;
-            Ok(names
+            let mut marked = Vec::with_capacity(names.len());
+            let mut boxes: Vec<RemoteMailbox> = names
                 .iter()
                 .map(|n| {
                     let full = n.name().to_string();
@@ -307,15 +359,19 @@ impl MailBackend for ImapBackend {
                         _ => (None, full.clone()),
                     };
                     let selectable = !n.attributes().iter().any(|a| matches!(a, NameAttribute::NoSelect));
+                    let (role, by_server) = role_for(&full, n.attributes());
+                    marked.push(by_server);
                     RemoteMailbox {
-                        role: role_for(&full, n.attributes()),
+                        role,
                         name: if full.eq_ignore_ascii_case("INBOX") { "Inbox".into() } else { leaf },
                         remote_id: full,
                         parent_remote_id: parent,
                         selectable,
                     }
                 })
-                .collect())
+                .collect();
+            one_per_role(&mut boxes, &marked);
+            Ok(boxes)
         })
         .await
     }
@@ -668,12 +724,50 @@ mod tests {
     }
 
     #[test]
+    fn one_mailbox_per_role() {
+        let mb = |name: &str, role| RemoteMailbox {
+            remote_id: name.into(),
+            name: name.into(),
+            parent_remote_id: None,
+            role,
+            selectable: true,
+        };
+        // Gmail with old labels from a phone: the marked ones win, wherever they are listed.
+        let mut boxes = vec![
+            mb("Sent", MailboxRole::Sent),
+            mb("Sent Messages", MailboxRole::Sent),
+            mb("Trash", MailboxRole::Trash),
+            mb("[Gmail]/Sent Mail", MailboxRole::Sent),
+            mb("[Gmail]/Trash", MailboxRole::Trash),
+            mb("Deleted Messages", MailboxRole::Trash),
+        ];
+        one_per_role(&mut boxes, &[false, false, false, true, true, false]);
+        let roles: Vec<_> = boxes.iter().map(|b| (b.remote_id.as_str(), b.role)).collect();
+        assert_eq!(
+            roles,
+            [
+                ("Sent", MailboxRole::Custom),
+                ("Sent Messages", MailboxRole::Custom),
+                ("Trash", MailboxRole::Custom),
+                ("[Gmail]/Sent Mail", MailboxRole::Sent),
+                ("[Gmail]/Trash", MailboxRole::Trash),
+                ("Deleted Messages", MailboxRole::Custom),
+            ]
+        );
+
+        // No SPECIAL-USE at all: the first name match keeps the role.
+        let mut plain = vec![mb("Sent Items", MailboxRole::Sent), mb("Sent", MailboxRole::Sent)];
+        one_per_role(&mut plain, &[false, false]);
+        assert_eq!((plain[0].role, plain[1].role), (MailboxRole::Sent, MailboxRole::Custom));
+    }
+
+    #[test]
     fn roles_from_attributes_and_names() {
-        assert_eq!(role_for("INBOX", &[]), MailboxRole::Inbox);
-        assert_eq!(role_for("[Gmail]/Sent Mail", &[NameAttribute::Sent]), MailboxRole::Sent);
-        assert_eq!(role_for("INBOX.Trash", &[]), MailboxRole::Trash);
-        assert_eq!(role_for("Deleted Messages", &[]), MailboxRole::Trash);
-        assert_eq!(role_for("Receipts", &[]), MailboxRole::Custom);
+        assert_eq!(role_for("INBOX", &[]).0, MailboxRole::Inbox);
+        assert_eq!(role_for("[Gmail]/Sent Mail", &[NameAttribute::Sent]), (MailboxRole::Sent, true));
+        assert_eq!(role_for("INBOX.Trash", &[]), (MailboxRole::Trash, false));
+        assert_eq!(role_for("Deleted Messages", &[]).0, MailboxRole::Trash);
+        assert_eq!(role_for("Receipts", &[]).0, MailboxRole::Custom);
     }
 
     #[test]

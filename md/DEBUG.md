@@ -21,6 +21,23 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-22 — Gmail account showed three Sent folders
+
+**Saw:** the sidebar listed Sent three times (and Trash/Drafts more than once) for the
+user's Gmail: `[Gmail]/Sent Mail` plus old labels `Sent Messages` (132 messages, 2011–2013)
+and `Sent` (3), and labels `Trash` (7) and `Deleted Messages` (0) — the names an iPhone or
+Apple Mail creates when an account is set up over IMAP.
+
+**Cause:** `role_for` trusts SPECIAL-USE attributes but also guesses roles from names for
+servers without them; on Gmail both applied, so every match became Sent/Trash.
+`mailbox_by_role` then took whichever came first — sent copies or deletes could have gone to
+an old label.
+
+**Fix:** `one_per_role` keeps one mailbox per role (the server-marked one, else the first name
+match); the rest become ordinary folders with their mail intact. Before changing anything the
+user asked for a copy of those mailboxes: `examples/export_mailboxes.rs` (read-only EXAMINE +
+BODY.PEEK, `.eml` files + index.csv).
+
 ## 2026-10-22 — Gmail: every conversation counted one message too many
 
 **Saw (first real Gmail account):** a single "Welcome to Google…" message showed **2** next
