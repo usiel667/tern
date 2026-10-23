@@ -542,3 +542,29 @@ fn migrates_v5_mailboxes_to_v6() {
     let s = Store::init(s.conn).unwrap();
     assert_eq!(s.mailboxes(Some(acct)).unwrap().len(), 2);
 }
+
+#[test]
+fn full_resync_updates_in_place_unless_renumbered() {
+    let (mut s, _, inbox, _) = setup();
+    let full = |added: Vec<Envelope>, ids_invalidated| MailboxDelta { added, full_resync: true, ids_invalidated, ..Default::default() };
+    let mut broken = env("1", "<a@x>", None, "Hi", "Ann", 1);
+    broken.preview = Some("R2V0IHN0YXJ0ZWQ=".into());
+    s.apply_delta(inbox, &full(vec![broken, env("2", "<b@x>", None, "Yo", "Bob", 2)], false)).unwrap();
+    let id = s.list(&ListScope::Mailbox(inbox), false, 10).unwrap().into_iter().find(|m| m.envelope.remote_id == "1").unwrap().id;
+    s.store_body(id, &MessageBody { text: Some("hello".into()), html: None, attachments: vec![], list_unsubscribe: None, list_unsubscribe_post: false, raw: b"x".to_vec() }).unwrap();
+
+    // Same ids, fetched again (cache refresh): preview fixed, body kept, "2" gone from the server.
+    let mut fixed = env("1", "<a@x>", None, "Hi", "Ann", 1);
+    fixed.preview = Some("Get started".into());
+    s.apply_delta(inbox, &full(vec![fixed.clone()], false)).unwrap();
+    let rows = s.list(&ListScope::Mailbox(inbox), false, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].id, rows[0].envelope.preview.as_deref()), (id, Some("Get started")));
+    assert_eq!(s.body(id).unwrap().and_then(|b| b.text).as_deref(), Some("hello"));
+
+    // Renumbered: everything cached is dropped first.
+    s.apply_delta(inbox, &full(vec![fixed], true)).unwrap();
+    let rows = s.list(&ListScope::Mailbox(inbox), false, 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(s.body(rows[0].id).unwrap().is_none(), "a fresh row, no cached body");
+}

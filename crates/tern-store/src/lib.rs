@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub struct Store {
     conn: Connection,
@@ -235,7 +235,10 @@ impl Store {
         let tx = self.conn.transaction().map_err(db)?;
         let cached_before = cached_counts(&tx, mailbox)?;
         {
-            if delta.full_resync {
+            // Renumbered (IMAP UIDVALIDITY changed): cached rows may now name other messages.
+            // A full resync with the same ids instead updates rows in place below, keeping
+            // downloaded bodies, and drops the ones the server no longer lists.
+            if delta.full_resync && delta.ids_invalidated {
                 tx.execute("DELETE FROM messages WHERE mailbox = ?1", [mailbox.0])
                     .map_err(db)?;
             }
@@ -304,7 +307,9 @@ impl Store {
             for rid in &delta.removed {
                 del.execute(params![mailbox.0, rid]).map_err(db)?;
             }
-            if let Some(present) = &delta.present {
+            let nothing_else: Vec<String> = Vec::new();
+            let present = if delta.full_resync { Some(&nothing_else) } else { delta.present.as_ref() };
+            if let Some(present) = present {
                 let keep: std::collections::HashSet<&str> = present
                     .iter()
                     .chain(delta.added.iter().map(|e| &e.remote_id))
@@ -892,6 +897,11 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         for column in ["server_total", "server_unread", "base_total", "base_unread"] {
             add_column(conn, "mailboxes", column, "INTEGER")?;
         }
+    }
+    if from < 7 {
+        // Previews of multipart mail were stored undecoded (base64 / quoted-printable): fetch
+        // every mailbox's list again. Rows are updated in place, so bodies stay.
+        conn.execute("UPDATE mailboxes SET sync_state = NULL", []).map_err(db)?;
     }
     Ok(())
 }

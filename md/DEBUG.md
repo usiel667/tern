@@ -21,6 +21,24 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-22 — List previews showed base64 / quoted-printable
+
+**Saw (real Gmail, screenshot):** previews like `R2V0IHN0YXJ0ZWQgd2l0aCBH…` (base64 of "Get started
+with Google…") and `=E2=80=8C =E2=80=8C…` (quoted-printable zero-width padding).
+
+**Cause:** the list fetch takes the first 2 KB of the body (`BODY.PEEK[TEXT]<0.2048>`). In
+multipart mail that cut ends inside a part, the multipart never closes, and mail-parser leaves
+the unterminated part undecoded. (A single-part cut decodes fine.) A cut inside a QP escape
+(`=E`) also ate the characters before it.
+
+**Fix:** `close_open_multiparts` ends every multipart the prefix opened; a dangling `=`/`=X` is
+trimmed; zero-width padding characters are dropped from previews. Checked on 2,074 of the
+user's real messages (export): quoted-printable-looking previews 75 → 0; three replies whose
+first 2 KB is only quoted text now have no preview (correct: quotes are skipped; before, raw
+`=3E` hid the `>`). Schema v7 makes every mailbox fetch its list again once; a full resync
+without renumbering now updates rows in place, keeping downloaded bodies (and not
+double-counting contacts).
+
 ## 2026-10-22 — Gmail account showed three Sent folders
 
 **Saw:** the sidebar listed Sent three times (and Trash/Drafts more than once) for the

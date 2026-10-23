@@ -22,7 +22,15 @@ pub fn envelope_from_parts(
         if !raw.ends_with(b"\r\n\r\n") && !raw.ends_with(b"\n\n") {
             raw.extend_from_slice(b"\r\n");
         }
+        // A prefix cut inside a quoted-printable escape ("=E" of "=E2") makes the decoder eat
+        // the characters before it too; leave the half escape out.
+        let b = match b {
+            [rest @ .., b'='] => rest,
+            [rest @ .., b'=', h] if h.is_ascii_hexdigit() => rest,
+            _ => b,
+        };
         raw.extend_from_slice(b);
+        close_open_multiparts(&mut raw);
     }
     let parser = MessageParser::default();
     let Some(msg) = parser.parse(&raw) else {
@@ -186,6 +194,38 @@ pub fn attachment_bytes(raw: &[u8], index: u32) -> Option<Vec<u8>> {
     msg.attachments().nth(index as usize).map(|p| p.contents().to_vec())
 }
 
+/// The preview comes from the first 2 KB of the body, usually cut off inside a MIME part. A
+/// part whose multipart never ends isn't decoded (base64 and quoted-printable come out raw),
+/// so end every multipart the prefix opened.
+fn close_open_multiparts(raw: &mut Vec<u8>) {
+    let text = String::from_utf8_lossy(raw).into_owned();
+    let mut open: Vec<String> = Vec::new();
+    let lower = text.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("boundary=") {
+        let start = at + i + "boundary=".len();
+        let rest = &text[start..];
+        let b = match rest.strip_prefix('"') {
+            Some(q) => q.split('"').next().unwrap_or(""),
+            None => rest.split(|c: char| c == ';' || c.is_whitespace()).next().unwrap_or(""),
+        };
+        if !b.is_empty() && !open.iter().any(|o| o == b) {
+            open.push(b.to_string());
+        }
+        at = start;
+    }
+    for b in open.iter().rev() {
+        if !text.contains(&format!("--{b}--")) {
+            raw.extend_from_slice(format!("\r\n--{b}--\r\n").as_bytes());
+        }
+    }
+}
+
+/// Characters newsletters put in their preview text to pad it out; they print as nothing.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '\u{00AD}' | '\u{034F}')
+}
+
 fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
     let text = msg.body_text(0)?;
     let mut out = String::with_capacity(PREVIEW_CHARS);
@@ -196,7 +236,7 @@ fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
         if l.starts_with('>') || (l.starts_with("On ") && l.ends_with("wrote:")) {
             continue;
         }
-        for c in l.chars().chain(std::iter::once(' ')) {
+        for c in l.chars().filter(|&c| !invisible(c)).chain(std::iter::once(' ')) {
             let space = c.is_whitespace();
             if space && last_space {
                 continue;
@@ -250,6 +290,65 @@ In-Reply-To: <b@x>\r\n\
 References: <a@x> <b@x>\r\n\
 Content-Type: text/plain; charset=utf-8\r\n\r\n";
 
+    /// Body cut at 2 KB, as the list fetch does.
+    fn cut_preview(content_type: &str, body: &str) -> Option<String> {
+        let header = format!("From: a@b.c\r\nSubject: x\r\nMIME-Version: 1.0\r\nContent-Type: {content_type}\r\n\r\n");
+        let cut = &body.as_bytes()[..body.len().min(2048)];
+        envelope_from_parts("1".into(), header.as_bytes(), Some(cut), Flags::default(), 0, None).preview
+    }
+
+    #[test]
+    fn preview_of_cut_off_multipart_base64() {
+        // "Get started with Google on your Linux computer. " × 60, base64 in 76-char lines.
+        let text = "Get started with Google on your Linux computer. ".repeat(60);
+        let encoded = base64_lines(text.as_bytes());
+        let body = format!(
+            "--A\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n\
+             --A\r\nContent-Type: text/html\r\n\r\n<p>x</p>\r\n--A--\r\n"
+        );
+        let p = cut_preview("multipart/alternative; boundary=\"A\"", &body).unwrap();
+        assert!(p.starts_with("Get started with Google on your Linux computer."), "{p}");
+    }
+
+    #[test]
+    fn preview_of_cut_off_quoted_printable_html_without_padding() {
+        let html = format!(
+            "<p>Plus, onboarding =E2=80=8C =E2=80=8C=C2=A0 strategies</p>{}",
+            "<p>and more news here</p>=\r\n".repeat(150)
+        );
+        let body = format!(
+            "--outer\r\nContent-Type: multipart/alternative; boundary=inner\r\n\r\n\
+             --inner\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n{html}\r\n--inner--\r\n--outer--\r\n"
+        );
+        let p = cut_preview("multipart/mixed; boundary=outer", &body).unwrap();
+        assert!(p.starts_with("Plus, onboarding strategies and more news here"), "{p}");
+        assert!(!p.contains('='), "{p}");
+    }
+
+    #[test]
+    fn preview_survives_a_cut_inside_a_quoted_printable_escape() {
+        for cut in ["=", "=E"] {
+            let body = format!(
+                "--A\r\nContent-Transfer-Encoding: quoted-printable\r\nContent-Type: text/plain;\r\n\r\nSee you at caf=C3=A9 soon{cut}"
+            );
+            let header = "From: a@b.c\r\nContent-Type: multipart/alternative; boundary=\"A\"\r\n\r\n";
+            let e = envelope_from_parts("1".into(), header.as_bytes(), Some(body.as_bytes()), Flags::default(), 0, None);
+            assert_eq!(e.preview.as_deref(), Some("See you at café soon"), "cut {cut:?}");
+        }
+    }
+
+    fn base64_lines(data: &[u8]) -> String {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for c in data.chunks(3) {
+            let n = u32::from(c[0]) << 16 | u32::from(*c.get(1).unwrap_or(&0)) << 8 | u32::from(*c.get(2).unwrap_or(&0));
+            for i in 0..4 {
+                out.push(if i <= c.len() { T[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+            }
+        }
+        out.as_bytes().chunks(76).map(|l| std::str::from_utf8(l).unwrap()).collect::<Vec<_>>().join("\r\n")
+    }
+
     #[test]
     fn envelope_decodes_headers_and_preview() {
         let body = b"Sounds   good,\r\nsee you there.\r\n\r\nOn Tue, Bob wrote:\r\n> earlier\r\n";
@@ -293,3 +392,4 @@ Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--B--\r\n"
         assert!(b.html.is_none());
     }
 }
+
