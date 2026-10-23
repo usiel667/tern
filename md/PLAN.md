@@ -67,7 +67,7 @@ Key decisions:
 | Smart mailbox: Unread | ✅ | |
 | User-defined Smart Mailboxes (rules editor) | ⬜ | `ListScope` + SQL filters make this straightforward |
 | VIPs | ⬜ | |
-| Organize by Conversation | ✅ | toggle in menu; count badge |
+| Organize by Conversation | ✅ | toggle in menu; count badge; replies only (Gmail-style same-subject grouping planned as a setting) |
 | Conversation view showing all messages | 🟡 | list of thread messages above the open one; Apple stacks full bodies |
 | Unread dot, colored flags (7 colors), replied/forwarded icons | ✅ | flags round-trip via `$MailFlagBit*` like Apple |
 | Two-line previews, Apple-style dates | ✅ | |
@@ -182,8 +182,10 @@ Key decisions:
 4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
 5. **Reading polish:** full stacked conversation view, open-in-window, print, view source,
    RFC 8058 one-click unsubscribe, Quick Look via xdg-open.
-6. **Settings + packaging:** Preferences window (incl. optional Vim key bindings, themes, and
-   the Undo Send delay: Off / 10 / 20 / 30 s),
+6. **Settings + packaging:** Preferences window (incl. optional Vim key bindings, themes,
+   the Undo Send delay: Off / 10 / 20 / 30 s, and conversation grouping: replies only (default,
+   today's behaviour) or also Gmail-style — same exact subject from the same sender within
+   ~3 days, decided 2026-10-22),
    AUR package, Flatpak manifest.
 
 ## Known gaps worth knowing now
