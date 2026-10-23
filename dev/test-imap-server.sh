@@ -141,7 +141,7 @@ case "${1:-}" in
         rm -rf "$DIR"
         ;;
     env)
-        echo "export TERN_IMAP_HOST=localhost TERN_IMAP_USER=$USER_NAME TERN_IMAP_PASS=$PASSWORD" \
+        echo "export TERN_IMAP_HOST=localhost TERN_IMAP_USER=$USER_NAME TERN_LIVE_WIPE_OK=$USER_NAME TERN_IMAP_PASS=$PASSWORD" \
              "TERN_IMAP_PORT=$IMAPS_PORT TERN_IMAP_STARTTLS_PORT=$IMAP_PORT SSL_CERT_FILE=$DIR/ca.crt"
         ;;
     *)

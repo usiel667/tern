@@ -1,12 +1,15 @@
 //! Live test against a real IMAP server. Ignored by default.
 //!
-//! Use a throwaway account — it appends, moves and expunges mail:
+//! Use a throwaway account — it EMPTIES the INBOX and Trash, then appends, moves and
+//! expunges mail. `TERN_LIVE_WIPE_OK` must repeat the user name to confirm:
 //!
 //! ```sh
-//! TERN_IMAP_HOST=mail.test TERN_IMAP_USER=tom TERN_IMAP_PASS=... \
-//!   cargo test -p tern-imap --test live -- --ignored --nocapture
+//! dev/live-test.sh .env.gmail-test        # a real provider, settings in a git-ignored file
+//! eval "$(dev/test-imap-server.sh env)"   # or the local Dovecot, then:
+//! cargo test -p tern-imap --test live -- --ignored --nocapture
 //! ```
-//! Optional: `TERN_IMAP_PORT` (993), `TERN_IMAP_STARTTLS_PORT` (143, `0` to skip).
+//! Variables: `TERN_IMAP_HOST`, `TERN_IMAP_USER`, `TERN_IMAP_PASS`, `TERN_LIVE_WIPE_OK`;
+//! optional `TERN_IMAP_PORT` (993), `TERN_IMAP_STARTTLS_PORT` (143, `0` to skip).
 
 use std::time::Duration;
 
@@ -21,10 +24,18 @@ fn env(k: &str) -> Option<String> {
 }
 
 fn backend(port: u16, security: Security) -> ImapBackend {
+    let user = env("TERN_IMAP_USER").expect("TERN_IMAP_USER");
+    // These tests delete mail; never run them against an account nobody said was disposable.
+    assert_eq!(
+        env("TERN_LIVE_WIPE_OK").as_deref(),
+        Some(user.as_str()),
+        "TERN_LIVE_WIPE_OK must repeat TERN_IMAP_USER: the tests empty INBOX and Trash"
+    );
     let server = ServerConfig { host: env("TERN_IMAP_HOST").unwrap(), port, security };
     let cred = Credential::Password {
-        username: env("TERN_IMAP_USER").unwrap(),
-        password: env("TERN_IMAP_PASS").unwrap(),
+        username: user,
+        // Google shows app passwords in groups of four; it signs in without the spaces.
+        password: env("TERN_IMAP_PASS").unwrap().split_whitespace().collect(),
     };
     ImapBackend::new(server, cred)
 }

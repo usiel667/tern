@@ -17,6 +17,7 @@ dev/test-display.sh pointer drag 100 800 300 400      # virtual mouse (move/glid
 dev/test-display.sh shot shot.png                    # screenshot the test display
 dev/test-imap-server.sh start                        # local Dovecot for live tests (target/dovecot)
 eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- --ignored --nocapture
+dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
 ## 2026-10-21 — Test display keys went nowhere
