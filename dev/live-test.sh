@@ -15,10 +15,16 @@ if git -C "$(dirname "$file")" ls-files --error-unmatch "$(basename "$file")" >/
     echo "$file is tracked by git; secrets must stay in an ignored file" >&2
     exit 1
 fi
-set -a
-# shellcheck disable=SC1090
-source "$file"
-set +a
+# Read KEY=value lines as data (never run the file): values may contain spaces, as Google's
+# app passwords do, and nothing in it can execute.
+while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "$line" =~ ^[[:space:]]*(TERN_[A-Z_]+)=(.*)$ ]] || { echo "ignoring a line in $file that isn't TERN_…=value" >&2; continue; }
+    value="${BASH_REMATCH[2]}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    export "${BASH_REMATCH[1]}=$value"
+done <"$file"
 for v in TERN_IMAP_HOST TERN_IMAP_USER TERN_IMAP_PASS TERN_LIVE_WIPE_OK; do
     [[ -n "${!v:-}" ]] || { echo "$v is empty in $file" >&2; exit 1; }
 done
