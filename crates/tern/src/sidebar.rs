@@ -73,12 +73,9 @@ impl Sidebar {
                 .map(|m| if unread { m.unread } else { m.total })
                 .sum()
         };
-        let flagged = ui.store.borrow().list(&ListScope::Flagged, false, 10_000).map(|v| v.len() as u32).unwrap_or(0);
-        let unread_total: u32 = mailboxes
-            .iter()
-            .filter(|m| !matches!(m.remote.role, MailboxRole::Trash | MailboxRole::Junk))
-            .map(|m| m.unread)
-            .sum();
+        // Counted by the store so a message in several mailboxes (Gmail's All Mail) counts once.
+        let flagged = ui.store.borrow().count(&ListScope::Flagged).unwrap_or(0);
+        let unread_total = ui.store.borrow().count(&ListScope::Unread).unwrap_or(0);
 
         self.section("Favorites");
         self.item(0, "tern-inbox-symbolic", "All Inboxes", sum(MailboxRole::Inbox, true), Some(ListScope::Role(MailboxRole::Inbox)), None);

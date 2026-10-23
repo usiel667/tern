@@ -429,3 +429,59 @@ fn finds_cached_messages_by_message_id() {
     assert_eq!(s.find_by_message_id(inbox, "<draft-v3@tern>").unwrap().map(|(_, r)| r), Some("7".into()));
     assert!(s.find_by_message_id(inbox, "<nope@tern>").unwrap().is_none());
 }
+
+#[test]
+fn gmail_copies_count_once() {
+    // Gmail: every message is also in All Mail, starred ones in Starred too.
+    let mut s = Store::open_in_memory().unwrap();
+    let acct = AccountId::new();
+    let mb = |rid: &str, role| RemoteMailbox { remote_id: rid.into(), name: rid.into(), parent_remote_id: None, role, selectable: true };
+    s.sync_mailboxes(
+        acct,
+        &[
+            mb("INBOX", MailboxRole::Inbox),
+            mb("[Gmail]/All Mail", MailboxRole::All),
+            mb("[Gmail]/Starred", MailboxRole::Flagged),
+        ],
+    )
+    .unwrap();
+    let id = |role| s.mailboxes(Some(acct)).unwrap().into_iter().find(|m| m.remote.role == role).unwrap().id;
+    let (inbox, all, starred) = (id(MailboxRole::Inbox), id(MailboxRole::All), id(MailboxRole::Flagged));
+    let flagged = |mut e: Envelope| {
+        e.flags.flag = Some(FlagColor::Red);
+        e
+    };
+    let add = |s: &mut Store, mb, added| s.apply_delta(mb, &MailboxDelta { added, ..Default::default() }).unwrap();
+    add(&mut s, all, vec![
+        flagged(env("10", "<a@x>", None, "Welcome", "Google", 1)),
+        env("11", "<b@x>", Some("<a@x>"), "Re: Welcome", "Ann", 2),
+    ]);
+    add(&mut s, inbox, vec![
+        flagged(env("1", "<a@x>", None, "Welcome", "Google", 1)),
+        env("2", "<b@x>", Some("<a@x>"), "Re: Welcome", "Ann", 2),
+    ]);
+    add(&mut s, starred, vec![flagged(env("7", "<a@x>", None, "Welcome", "Google", 1))]);
+
+    let rows = s.list(&ListScope::Mailbox(inbox), true, 50).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].thread_count, 2, "two messages, not their four copies");
+
+    let thread = s.thread(rows[0].thread_id.unwrap()).unwrap();
+    assert_eq!(thread.len(), 2);
+    assert!(thread.iter().all(|m| m.mailbox == inbox), "the Inbox copy, not All Mail's");
+
+    let flagged_rows = s.list(&ListScope::Flagged, false, 50).unwrap();
+    assert_eq!(flagged_rows.len(), 1, "flagged once, not per mailbox");
+    assert_eq!(flagged_rows[0].mailbox, inbox);
+
+    let everything = s.list(&ListScope::Everything, false, 50).unwrap();
+    assert_eq!(everything.len(), 2);
+    let found = s.search(&SearchQuery::parse("welcome"), &ListScope::Everything, 50).unwrap();
+    assert_eq!(found.len(), 2, "{found:?}");
+
+    assert_eq!(s.count(&ListScope::Flagged).unwrap(), 1);
+    assert_eq!(s.count(&ListScope::Unread).unwrap(), 2, "two unread messages, six unread copies");
+
+    // All Mail on its own still lists its messages.
+    assert_eq!(s.list(&ListScope::Mailbox(all), false, 50).unwrap().len(), 2);
+}

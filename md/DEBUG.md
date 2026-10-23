@@ -20,6 +20,37 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-22 — Gmail: every conversation counted one message too many
+
+**Saw (first real Gmail account):** a single "Welcome to Google…" message showed **2** next
+to its time, a two-message thread **3**; the Unread badge was about twice the real number.
+
+**Cause:** Gmail exposes one message in several IMAP mailboxes (Inbox, All Mail, often
+Important and Starred), so the cache holds a copy per mailbox. The conversation size was a
+plain `COUNT(*)` over the thread across mailboxes, the conversation view listed each copy,
+Flagged/Unread/search listed one row per copy, and the Unread badge summed every
+mailbox's unread count. On the user's cache: 1,827 unread copies for 934 unread messages;
+995 Inbox conversations miscounted.
+
+**Fix:** `one_copy()` in tern-store keeps one row per Message-ID per account wherever a list
+spans mailboxes (list, thread, search, new `Store::count`), preferring a real mailbox over
+All Mail / Important / Starred; conversation size counts distinct Message-IDs. Messages
+without a Message-ID always count. Test: `gmail_copies_count_once`.
+
+**Still open:** unread counts come from the cache, which holds only the newest 1000 messages
+per mailbox at first (934 vs Gmail's 4,832). Next: server counts (IMAP STATUS / JMAP).
+
+## 2026-10-22 — Live tests against real Gmail
+
+**Saw:** both IMAP live tests failed on a throwaway Gmail. **Causes (test assumptions, not
+Tern bugs):** Gmail has no Archive mailbox (All Mail; the Archive button already falls back
+to it); EXPUNGE in All Mail deletes nothing (Gmail deletes via Trash; Tern's Delete moves
+there); Gmail offers CONDSTORE but not QRESYNC; the IDLE watcher signed in slower than the
+1.5 s pause, so the APPEND came before IDLE started. **Fix:** a scratch label
+(`create_mailbox`), the test reads which extensions are in use (`extensions()`), the
+watcher signs in first. **Measured:** Gmail's IDLE push for an APPENDed message took 35 s
+and over 45 s (Dovecot: immediate); real incoming mail still to measure.
+
 ## 2026-10-21 — Test display keys went nowhere
 
 **Saw (testing Undo Send):** `dev/test-display.sh keys 'Tern' CTRL+n` did nothing; nested

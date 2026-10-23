@@ -40,6 +40,9 @@ fn backend(port: u16, security: Security) -> ImapBackend {
     ImapBackend::new(server, cred)
 }
 
+/// Created by `change_tracking`; left in place for the next run.
+const SCRATCH: &str = "Tern Live Test";
+
 fn message(n: u32, subject: &str) -> Vec<u8> {
     format!(
         "From: Ann <ann@example.com>\r\nTo: Tom <tom@example.com>\r\nSubject: {subject}\r\n\
@@ -139,10 +142,16 @@ async fn full_cycle() {
     let watcher = std::sync::Arc::new(backend(port, Security::Tls));
     let w = watcher.clone();
     let inbox2 = inbox.clone();
-    let idle = tokio::spawn(async move { w.wait_for_push(&inbox2, Duration::from_secs(20)).await });
+    // Sign in first (it keeps the session): over the internet that can take longer than the
+    // pause below, and mail appended before IDLE starts isn't news to it.
+    watcher.wait_for_push(&inbox, Duration::from_secs(1)).await.unwrap();
+    let idle = tokio::spawn(async move { w.wait_for_push(&inbox2, Duration::from_secs(150)).await });
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    let appended_at = std::time::Instant::now();
     b.append(&inbox, &message(5, "Live 5"), &Flags::default()).await.unwrap();
-    let pushed = tokio::time::timeout(Duration::from_secs(15), idle).await.expect("idle returned").unwrap().unwrap();
+    // Dovecot pushes at once; Gmail took 35 s and over 45 s for an APPENDed message.
+    let pushed = tokio::time::timeout(Duration::from_secs(120), idle).await.expect("idle returned").unwrap().unwrap();
+    println!("IDLE push after {:?}", appended_at.elapsed());
     assert!(matches!(pushed, Some(PushEvent::MailboxChanged { .. })), "got {pushed:?}");
 
     // Delete from Trash permanently.
@@ -167,8 +176,9 @@ async fn full_cycle() {
 }
 
 /// Change tracking (CONDSTORE / QRESYNC), run three times: with everything the
-/// server offers, as if it only had CONDSTORE, and as if it had neither. Uses
-/// Archive so it doesn't collide with `full_cycle`. A second connection plays
+/// server offers, as if it only had CONDSTORE, and as if it had neither. Uses its own
+/// scratch mailbox so it doesn't collide with `full_cycle` (on Gmail a label: deleting from
+/// All Mail with EXPUNGE doesn't delete, but removing a message from a label does). A second connection plays
 /// "another device".
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a live IMAP server (see file docs)"]
@@ -181,7 +191,8 @@ async fn change_tracking() {
         b.limit_extensions(ext).await;
         let other = backend(port, Security::Tls);
         let boxes = other.list_mailboxes().await.unwrap();
-        let archive = boxes.iter().find(|m| m.role == MailboxRole::Archive).expect("archive").remote_id.clone();
+        let archive = SCRATCH.to_string();
+        other.create_mailbox(&archive).await.expect("create scratch mailbox");
 
         // Start clean, then three messages.
         let d = other.sync_mailbox(&archive, None, None).await.unwrap();
@@ -195,6 +206,10 @@ async fn change_tracking() {
         }
         let d1 = b.sync_mailbox(&archive, None, Some(1000)).await.unwrap();
         assert_eq!(d1.added.len(), 3);
+        // What the server really offers within the limit (Gmail has CONDSTORE, not QRESYNC).
+        let used = b.extensions().await;
+        let name = if used.qresync { "qresync" } else if used.condstore { "condstore" } else { "neither" };
+        println!("    using {name}");
         let uids: Vec<String> = d1.added.iter().map(|e| e.remote_id.clone()).collect();
 
         // Idle mailbox.

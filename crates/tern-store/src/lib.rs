@@ -35,6 +35,26 @@ const SUMMARY_COLS: &str = "m.id, m.account, m.mailbox, m.thread_id, m.remote_id
      m.in_reply_to, m.refs, m.subject, m.from_json, m.to_json, m.cc_json, m.date, m.flags_json, \
      m.size, m.has_attachments, m.preview";
 
+/// The same message can sit in several mailboxes of one account: Gmail shows every message in
+/// All Mail too, often in Important and Starred, and a message you sent yourself is in Sent and
+/// Inbox. Lists keep one copy per Message-ID (messages without one always count), preferring a
+/// real mailbox over those catch-alls.
+fn one_copy(filter: &str) -> String {
+    format!(
+        "SELECT * FROM (
+             SELECT m.*, ROW_NUMBER() OVER (
+                 PARTITION BY m.account, COALESCE(m.message_id, 'row:' || m.id)
+                 ORDER BY CASE b.role WHEN 'all' THEN 2 WHEN 'important' THEN 1 WHEN 'flagged' THEN 1 ELSE 0 END, m.id
+             ) AS copy_rank
+             FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE {filter}
+         ) WHERE copy_rank = 1"
+    )
+}
+
+/// Distinct messages in a conversation (see `one_copy`).
+const THREAD_SIZE: &str =
+    "(SELECT COUNT(DISTINCT COALESCE(t.message_id, 'row:' || t.id)) FROM messages t WHERE t.thread_id = m.thread_id)";
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -378,18 +398,19 @@ impl Store {
         let (filter, args) = scope.sql();
         let sql = if conversations {
             format!(
-                "WITH scoped AS (SELECT m.* FROM messages m JOIN mailboxes b ON b.id = m.mailbox WHERE {filter}),
+                "WITH scoped AS ({scoped}),
                  latest AS (SELECT thread_id, MAX(date) AS d FROM scoped GROUP BY COALESCE(thread_id, id))
-                 SELECT {cols}, (SELECT COUNT(*) FROM messages t WHERE t.thread_id = m.thread_id)
+                 SELECT {cols}, {THREAD_SIZE}
                  FROM scoped m JOIN latest l ON l.thread_id IS m.thread_id AND l.d = m.date
                  GROUP BY COALESCE(m.thread_id, m.id)
                  ORDER BY m.date DESC LIMIT {limit}",
+                scoped = one_copy(&filter),
                 cols = SUMMARY_COLS
             )
         } else {
             format!(
-                "SELECT {cols}, 1 FROM messages m JOIN mailboxes b ON b.id = m.mailbox
-                 WHERE {filter} ORDER BY m.date DESC LIMIT {limit}",
+                "SELECT {cols}, 1 FROM ({scoped}) m ORDER BY m.date DESC LIMIT {limit}",
+                scoped = one_copy(&filter),
                 cols = SUMMARY_COLS
             )
         };
@@ -400,10 +421,19 @@ impl Store {
             .map_err(db)
     }
 
-    /// Every message in a conversation, oldest first, across mailboxes.
+    /// How many messages a scope holds, each counted once (see `one_copy`).
+    pub fn count(&self, scope: &ListScope) -> Result<u32> {
+        let (filter, args) = scope.sql();
+        self.conn
+            .query_row(&format!("SELECT COUNT(*) FROM ({})", one_copy(&filter)), params_from_iter(args), |r| r.get(0))
+            .map_err(db)
+    }
+
+    /// Every message in a conversation, oldest first, across mailboxes (each once).
     pub fn thread(&self, thread_id: i64) -> Result<Vec<MessageSummary>> {
         let sql = format!(
-            "SELECT {SUMMARY_COLS}, 1 FROM messages m WHERE m.thread_id = ?1 ORDER BY m.date ASC"
+            "SELECT {SUMMARY_COLS}, 1 FROM ({}) m ORDER BY m.date ASC",
+            one_copy("m.thread_id = ?1")
         );
         let mut stmt = self.conn.prepare(&sql).map_err(db)?;
         stmt.query_map([thread_id], summary_from_row)
@@ -556,9 +586,8 @@ impl Store {
             wheres.push(format!("m.date < {}", d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp()));
         }
         let sql = format!(
-            "SELECT {SUMMARY_COLS}, 1 FROM messages m JOIN mailboxes b ON b.id = m.mailbox
-             WHERE {} ORDER BY m.date DESC LIMIT {limit}",
-            wheres.join(" AND ")
+            "SELECT {SUMMARY_COLS}, 1 FROM ({}) m ORDER BY m.date DESC LIMIT {limit}",
+            one_copy(&wheres.join(" AND "))
         );
         let mut stmt = self.conn.prepare(&sql).map_err(db)?;
         stmt.query_map(params_from_iter(args), summary_from_row)

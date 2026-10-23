@@ -86,6 +86,25 @@ impl ImapBackend {
         *self.cmd.lock().await = None;
     }
 
+    /// Test hook: the change-tracking extensions the current connection uses (what the
+    /// server offers, within `limit_extensions`). `NONE` before the first command.
+    #[doc(hidden)]
+    pub async fn extensions(&self) -> Extensions {
+        self.cmd.lock().await.as_ref().map(|c| c.ext).unwrap_or(Extensions::NONE)
+    }
+
+    /// Create a mailbox (a label on Gmail). One that already exists is fine. Used by the
+    /// live tests for a scratch mailbox; mailbox management will build on it.
+    pub async fn create_mailbox(&self, name: &str) -> Result<()> {
+        self.with_session(async |s| match s.create(name).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.to_string().to_ascii_uppercase().contains("ALREADYEXISTS")
+                || e.to_string().to_ascii_lowercase().contains("already exists") => Ok(()),
+            Err(e) => Err(cmd(e)),
+        })
+        .await
+    }
+
     /// Log in and see which change-tracking extensions we can use. QRESYNC must
     /// be ENABLEd per connection; it implies CONDSTORE.
     async fn open_conn(&self) -> Result<Conn> {
