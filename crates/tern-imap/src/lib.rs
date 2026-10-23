@@ -1,7 +1,8 @@
 //! IMAP4rev1 backend.
 //!
-//! Two connections per account, as most clients do: one for commands, one that
-//! sits in IDLE on the inbox for push. Sync is UID-based and works on any
+//! Three connections per account: one for sync and other commands, one for opening
+//! messages (so a click never waits behind a sync round, which takes ~17 s on a big Gmail
+//! account), and one that sits in IDLE on the inbox for push. Sync is UID-based and works on any
 //! server; CONDSTORE/QRESYNC are an optimisation to add later (see md/PLAN.md).
 
 mod connect;
@@ -9,7 +10,7 @@ mod state;
 
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_imap::extensions::idle::IdleResponse;
 use async_imap::types::{Fetch, Flag, NameAttribute, UnsolicitedResponse};
@@ -37,6 +38,9 @@ const MANAGED_FLAGS: &[&str] = &[
     "$MailFlagBit0", "$MailFlagBit1", "$MailFlagBit2",
 ];
 
+/// A connection unused for this long gets a NOOP before the next command.
+const STALE_AFTER: Duration = Duration::from_secs(60);
+
 /// Change-tracking extensions in use on a connection (RFC 7162).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Extensions {
@@ -53,12 +57,42 @@ impl Extensions {
 struct Conn {
     session: Session,
     ext: Extensions,
+    /// The mailbox SELECTed read-write, if any.
+    selected: Option<String>,
+    last_used: Instant,
+}
+
+impl Conn {
+    /// SELECT `mailbox` unless it already is. Commands by UID don't need a fresh SELECT,
+    /// and on Gmail each one takes a second or more.
+    async fn open(&mut self, mailbox: &str) -> Result<()> {
+        if self.selected.as_deref() == Some(mailbox) {
+            return Ok(());
+        }
+        // A failed SELECT leaves nothing selected.
+        self.selected = None;
+        self.session.select(mailbox).await.map_err(cmd)?;
+        self.selected = Some(mailbox.to_string());
+        Ok(())
+    }
+
+    /// SELECT `mailbox` again even if it's open, for its current UIDVALIDITY, counts and
+    /// HIGHESTMODSEQ.
+    async fn reselect(&mut self, mailbox: &str, condstore: bool) -> Result<async_imap::types::Mailbox> {
+        self.selected = None;
+        let mb = if condstore { self.session.select_condstore(mailbox).await } else { self.session.select(mailbox).await }
+            .map_err(cmd)?;
+        self.selected = Some(mailbox.to_string());
+        Ok(mb)
+    }
 }
 
 pub struct ImapBackend {
     server: ServerConfig,
     cred: Credential,
     cmd: Mutex<Option<Conn>>,
+    /// Only for `fetch_body`.
+    body: Mutex<Option<Conn>>,
     idle: Mutex<Option<Session>>,
     /// Extensions we're allowed to use even if the server offers more (tests).
     allowed: std::sync::Mutex<Extensions>,
@@ -72,6 +106,7 @@ impl ImapBackend {
             server,
             cred,
             cmd: Mutex::new(None),
+            body: Mutex::new(None),
             idle: Mutex::new(None),
             allowed: std::sync::Mutex::new(Extensions::ALL),
             sync_count: Default::default(),
@@ -84,6 +119,7 @@ impl ImapBackend {
     pub async fn limit_extensions(&self, ext: Extensions) {
         *self.allowed.lock().unwrap() = ext;
         *self.cmd.lock().await = None;
+        *self.body.lock().await = None;
     }
 
     /// Read-only export: every message in `mailbox` as raw RFC 822 bytes, oldest UID first,
@@ -95,7 +131,10 @@ impl ImapBackend {
         batch: usize,
         mut each: impl FnMut(u32, &[u8]) -> Result<()>,
     ) -> Result<usize> {
-        self.with_session(async |s| {
+        self.with_conn(async |c| {
+            // EXAMINE is read-only: STOREs would fail, so it doesn't count as selected.
+            c.selected = None;
+            let s = &mut c.session;
             s.examine(mailbox).await.map_err(cmd)?;
             let mut uids: Vec<u32> = s.uid_search("ALL").await.map_err(cmd)?.into_iter().collect();
             uids.sort_unstable();
@@ -149,7 +188,7 @@ impl ImapBackend {
         if qresync {
             session.run_command_and_check_ok("ENABLE QRESYNC").await.map_err(cmd)?;
         }
-        Ok(Conn { session, ext: Extensions { condstore, qresync } })
+        Ok(Conn { session, ext: Extensions { condstore, qresync }, selected: None, last_used: Instant::now() })
     }
 
     /// Connect and log in eagerly, to validate settings in the Add Account sheet.
@@ -170,11 +209,26 @@ impl ImapBackend {
 
     /// `with_session`, with access to the negotiated extensions.
     async fn with_conn<T>(&self, f: impl AsyncFnOnce(&mut Conn) -> Result<T>) -> Result<T> {
-        let mut guard = self.cmd.lock().await;
+        self.on(&self.cmd, f).await
+    }
+
+    /// Run `f` on the connection in `lane`. One left unused for a while is checked with a
+    /// NOOP first: Gmail drops idle connections without a word, and the command after that
+    /// would fail with "connection reset" (not retried: an APPEND might have gone through).
+    async fn on<T>(&self, lane: &Mutex<Option<Conn>>, f: impl AsyncFnOnce(&mut Conn) -> Result<T>) -> Result<T> {
+        let mut guard = lane.lock().await;
+        if let Some(c) = guard.as_mut()
+            && c.last_used.elapsed() > STALE_AFTER
+            && c.session.noop().await.is_err()
+        {
+            *guard = None;
+        }
         if guard.is_none() {
             *guard = Some(self.open_conn().await?);
         }
-        let result = f(guard.as_mut().expect("just connected")).await;
+        let conn = guard.as_mut().expect("just connected");
+        let result = f(conn).await;
+        conn.last_used = Instant::now();
         if matches!(result, Err(Error::Network(_) | Error::Protocol(_))) {
             *guard = None;
         }
@@ -384,16 +438,16 @@ impl MailBackend for ImapBackend {
     ) -> Result<MailboxDelta> {
         self.with_conn(async |c| {
             let ext = c.ext;
-            let s = &mut c.session;
             // Counts for the whole mailbox (only part of it is cached). Asked before SELECT,
             // since STATUS on the selected mailbox is discouraged; a failure just means none.
-            let counts = s
+            let counts = c
+                .session
                 .status(mailbox, "(MESSAGES UNSEEN)")
                 .await
                 .ok()
                 .and_then(|st| Some(MailboxCounts { total: st.exists, unread: st.unseen? }));
-            let mb = if ext.condstore { s.select_condstore(mailbox).await } else { s.select(mailbox).await }
-                .map_err(cmd)?;
+            let mb = c.reselect(mailbox, ext.condstore).await?;
+            let s = &mut c.session;
             let validity = mb.uid_validity.unwrap_or(0);
             // The counter as of this SELECT is what we record: anything that changes
             // while we're fetching has a higher modseq and is seen again next time.
@@ -513,8 +567,9 @@ impl MailBackend for ImapBackend {
     }
 
     async fn fetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
-        self.with_session(async |s| {
-            s.select(mailbox).await.map_err(cmd)?;
+        self.on(&self.body, async |c| {
+            c.open(mailbox).await?;
+            let s = &mut c.session;
             let fetches: Vec<Fetch> = s
                 .uid_fetch(remote_id, "(UID BODY.PEEK[])")
                 .await
@@ -537,8 +592,9 @@ impl MailBackend for ImapBackend {
         }
         let set = flags.to_imap();
         let unset: Vec<&str> = MANAGED_FLAGS.iter().copied().filter(|f| !set.contains(f)).collect();
-        self.with_session(async |s| {
-            s.select(mailbox).await.map_err(cmd)?;
+        self.with_conn(async |c| {
+            c.open(mailbox).await?;
+            let s = &mut c.session;
             let uids = uid_set(remote_ids);
             if !set.is_empty() {
                 s.uid_store(&uids, format!("+FLAGS.SILENT ({})", set.join(" ")))
@@ -569,8 +625,9 @@ impl MailBackend for ImapBackend {
         if prev.low_uid <= 1 {
             return Ok(unchanged(false));
         }
-        self.with_session(async |s| {
-            let mb = s.select(mailbox).await.map_err(cmd)?;
+        self.with_conn(async |c| {
+            let mb = c.reselect(mailbox, false).await?;
+            let s = &mut c.session;
             if mb.uid_validity.unwrap_or(0) != prev.uid_validity {
                 // Renumbered: the next regular sync does the full resync.
                 return Ok(unchanged(true));
@@ -603,8 +660,9 @@ impl MailBackend for ImapBackend {
         if remote_ids.is_empty() {
             return Ok(vec![]);
         }
-        self.with_session(async |s| {
-            s.select(from).await.map_err(cmd)?;
+        self.with_conn(async |c| {
+            c.open(from).await?;
+            let s = &mut c.session;
             let uids = uid_set(remote_ids);
             if s.uid_mv(&uids, to).await.is_err() {
                 // Server without MOVE (RFC 6851): COPY, mark deleted, UID EXPUNGE.
@@ -631,12 +689,14 @@ impl MailBackend for ImapBackend {
     async fn append(&self, mailbox: &str, raw: &[u8], flags: &Flags) -> Result<Option<String>> {
         let f = format!("({})", flags.to_imap().join(" "));
         let message_id = header_message_id(raw);
-        self.with_session(async |s| {
-            s.append(mailbox, Some(&f), None, raw).await.map_err(cmd)?;
+        self.with_conn(async |c| {
+            c.session.append(mailbox, Some(&f), None, raw).await.map_err(cmd)?;
             // async-imap doesn't expose APPENDUID, so find the new message by its
             // Message-ID (callers that need the id, like drafts, give each version its own).
             let Some(id) = &message_id else { return Ok(None) };
-            s.select(mailbox).await.map_err(cmd)?;
+            // A fresh SELECT, so the search surely sees the new message.
+            c.reselect(mailbox, false).await?;
+            let s = &mut c.session;
             let found = s
                 .uid_search(format!("HEADER Message-ID {}", imap_quote(id)))
                 .await
@@ -647,8 +707,9 @@ impl MailBackend for ImapBackend {
     }
 
     async fn expunge(&self, mailbox: &str) -> Result<()> {
-        self.with_session(async |s| {
-            s.select(mailbox).await.map_err(cmd)?;
+        self.with_conn(async |c| {
+            c.open(mailbox).await?;
+            let s = &mut c.session;
             s.expunge()
                 .await
                 .map_err(cmd)?

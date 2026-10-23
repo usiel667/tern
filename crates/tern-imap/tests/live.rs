@@ -127,10 +127,16 @@ async fn full_cycle() {
     assert_eq!(t1.added.len(), 1);
     assert_eq!(t1.added[0].subject, "Live 2");
 
-    // Full body.
+    // Full body. The first fetch signs in its own connection and SELECTs; the second reuses both.
+    let started = std::time::Instant::now();
     let body = b.fetch_body(&inbox, &uids[2]).await.unwrap();
+    let switching = started.elapsed();
     assert!(body.text.unwrap().contains("Body number 3"));
     assert!(!body.raw.is_empty());
+    let started = std::time::Instant::now();
+    let again = b.fetch_body(&inbox, &uids[0]).await.unwrap();
+    println!("fetch_body: {switching:?} first, {:?} already selected", started.elapsed());
+    assert!(again.text.unwrap().contains("Body number 1"));
 
     // New mail arrives → picked up incrementally.
     let appended = b.append(&inbox, &message(4, "Live 4"), &Flags::default()).await.unwrap();

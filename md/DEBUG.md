@@ -21,6 +21,25 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-23 — Opening a message could wait behind a whole sync round
+
+**Seen:** on the real Gmail account, a sync round with nothing new took 9–17 s (18
+mailboxes, 0.3–2 s each: STATUS, SELECT, FETCH CHANGEDSINCE, UID SEARCH). The engine spawns
+every mailbox's sync at once, and they all share the one command connection, whose tokio
+`Mutex` is first-come first-served, so a click during a round queued behind the rest of it.
+The log also showed Gmail dropping the idle command connection ("Connection reset by peer"),
+which failed the next command instead of reconnecting.
+
+**Wrong guess first:** I blamed SELECT (entry below). Measured on the real account, SELECT /
+EXAMINE takes ~120 ms, even on All Mail with 23k messages.
+
+**Fixed:** `fetch_body` has its own connection (`ImapBackend::body`), so opening a message
+mid-round took 124 ms. A connection unused for 60 s gets a NOOP first and is replaced if
+that fails (no blind retry: an APPEND might have gone through). Each connection remembers
+its selected mailbox and skips SELECT for UID commands (`Conn::open`); sync, older-mail
+loads and the post-APPEND search still SELECT afresh (`Conn::reselect`) for current
+UIDVALIDITY/HIGHESTMODSEQ. Not covered by a test: the stale-connection NOOP.
+
 ## 2026-10-22 — List previews showed base64 / quoted-printable
 
 **Saw (real Gmail, screenshot):** previews like `R2V0IHN0YXJ0ZWQgd2l0aCBH…` (base64 of "Get started
@@ -80,8 +99,7 @@ mailbox at first (934 vs Gmail's 4,832). Fixed by server counts (OpenSpec
 snapshot.
 
 **Also measured:** the long-session live test took 34 min on Gmail (~2.8 s per sync +
-body fetch pair): every command re-SELECTs its mailbox, and Gmail's SELECT is slow. Opening a
-message pays that too. Next: skip SELECT when the mailbox is already selected.
+body fetch pair). I blamed Gmail's SELECT; wrong — see the 2026-10-23 entry above.
 
 ## 2026-10-22 — Live tests against real Gmail
 
