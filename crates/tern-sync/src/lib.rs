@@ -31,6 +31,8 @@ pub use config::Paths;
 
 /// How many messages per mailbox to download on first sync.
 pub const INITIAL_SYNC_LIMIT: u32 = 1000;
+/// Bodies bigger than this aren't downloaded ahead, only when opened.
+pub const PREFETCH_MAX_SIZE: u64 = 5_000_000;
 /// How many older messages to download per mailbox when scrolling back.
 pub const OLDER_BATCH: u32 = 250;
 /// Background resync of every mailbox (push only watches the inbox).
@@ -211,7 +213,8 @@ enum Internal {
     Mailboxes(AccountId, Vec<RemoteMailbox>),
     Delta(AccountId, MailboxId, MailboxDelta),
     Older { account: AccountId, mailbox: MailboxId, result: Result<OlderBatch> },
-    Body(MessageId, MessageBody),
+    /// A body download finished; `ahead` for a background one (`prefetch`).
+    Body { id: MessageId, account: AccountId, ahead: bool, result: Result<MessageBody> },
     Push(AccountId, PushEvent),
     Sent { outbox_id: i64, account: AccountId, responding_to: Option<(MessageId, FlagChange)> },
     /// A queued message action finished (or failed) on the server.
@@ -344,6 +347,17 @@ pub struct Engine {
     /// The server had nothing older (this session).
     exhausted: std::collections::HashSet<MailboxId>,
     older_batch: u32,
+    /// Bodies being downloaded, opened or ahead of time, so none is fetched twice.
+    bodies_fetching: std::collections::HashSet<MessageId>,
+    /// Opened while already downloading ahead: if that fails, it's fetched for real.
+    bodies_awaited: std::collections::HashSet<MessageId>,
+    /// Mailboxes whose bodies are downloaded ahead, the one opened last first: inboxes
+    /// and every mailbox the user opens.
+    prefetch_from: Vec<MailboxId>,
+    /// Accounts with a download ahead in flight (one at a time each).
+    prefetching: std::collections::HashSet<AccountId>,
+    /// Failed to download ahead this session; fetched only when opened.
+    prefetch_failed: std::collections::HashSet<MessageId>,
 }
 
 impl Engine {
@@ -385,6 +399,11 @@ impl Engine {
             sync_wanted: Default::default(),
             exhausted: Default::default(),
             older_batch: OLDER_BATCH,
+            bodies_fetching: Default::default(),
+            bodies_awaited: Default::default(),
+            prefetch_from: Default::default(),
+            prefetching: Default::default(),
+            prefetch_failed: Default::default(),
         }
     }
 
@@ -430,7 +449,7 @@ impl Engine {
     pub async fn settle(&mut self) {
         loop {
             self.pump().await;
-            if self.in_flight.values().all(|&n| n == 0) {
+            if self.in_flight.values().all(|&n| n == 0) && self.prefetching.is_empty() {
                 break;
             }
             if let Some(msg) = self.rx.recv().await {
@@ -628,7 +647,12 @@ impl Engine {
     fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::SyncAll => self.sync_all(),
-            Command::SyncMailbox(m) => self.sync_mailbox(m),
+            Command::SyncMailbox(m) => {
+                // Only the UI sends this, when a mailbox is opened.
+                self.prefetch_from.retain(|&x| x != m);
+                self.prefetch_from.insert(0, m);
+                self.sync_mailbox(m);
+            }
             Command::LoadOlder(boxes) => boxes.into_iter().for_each(|m| self.load_older(m)),
             Command::FetchBody(id) => self.fetch_body(id),
             Command::SetFlags(ids, change) => self.set_flags(ids, change),
@@ -672,12 +696,49 @@ impl Engine {
             Err(e) => return self.fail(None, e),
         };
         let Some(acct) = self.accounts.get(&account) else { return };
+        if !self.bodies_fetching.insert(id) {
+            // Already on its way (opened twice, or being downloaded ahead): BodyReady follows.
+            self.bodies_awaited.insert(id);
+            return;
+        }
         let backend = acct.backend.clone();
         self.spawn_task(account, async move {
-            match backend.fetch_body(&mailbox, &rid).await {
-                Ok(b) => Internal::Body(id, b),
-                Err(error) => Internal::Failed { account: Some(account), mailbox: None, error },
+            let started = std::time::Instant::now();
+            let result = backend.fetch_body(&mailbox, &rid).await;
+            let took = started.elapsed();
+            if let Ok(b) = &result
+                && took >= Duration::from_millis(300)
+            {
+                info!(id = id.0, ?took, bytes = b.raw.len(), "slow body fetch");
             }
+            Internal::Body { id, account, ahead: false, result }
+        });
+    }
+
+    /// Download the next missing body of `account` in the background, newest first from
+    /// the mailboxes in `prefetch_from`, so opening it later is instant. One at a time, not
+    /// counted as busy (no spinner), and on its own connection where the backend has one.
+    fn prefetch(&mut self, account: AccountId) {
+        if self.prefetching.contains(&account) {
+            return;
+        }
+        let Some(acct) = self.accounts.get(&account) else { return };
+        let next = self.prefetch_from.iter().find_map(|&mb| {
+            self.store.mailbox(mb).ok().filter(|m| m.account == account)?;
+            // A few extra, in case the newest are in flight or failed before.
+            let skip = self.bodies_fetching.len() + self.prefetch_failed.len();
+            let ids = self.store.bodies_wanted(mb, PREFETCH_MAX_SIZE, skip + 1).ok()?;
+            ids.into_iter().find(|id| !self.bodies_fetching.contains(id) && !self.prefetch_failed.contains(id))
+        });
+        let Some(id) = next else { return };
+        let Ok((_, mailbox, rid)) = self.store.remote_ref(id) else { return };
+        self.prefetching.insert(account);
+        self.bodies_fetching.insert(id);
+        let backend = acct.backend.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = backend.prefetch_body(&mailbox, &rid).await;
+            let _ = tx.send(Internal::Body { id, account, ahead: true, result });
         });
     }
 
@@ -1163,6 +1224,7 @@ impl Engine {
 
     fn remove_account(&mut self, id: AccountId) {
         self.accounts.remove(&id);
+        self.prefetching.remove(&id);
         self.auth_retry.remove(&id);
         self.send_limits.remove(&id);
         self.draining.remove(&id);
@@ -1236,6 +1298,10 @@ impl Engine {
                 }
                 self.emit(Event::MessagesChanged(Some(mailbox)));
                 self.emit(Event::MailboxesChanged);
+                if is_inbox && !self.prefetch_from.contains(&mailbox) {
+                    self.prefetch_from.push(mailbox);
+                }
+                self.prefetch(account);
                 if is_inbox && !initial && !new_unseen.is_empty() {
                     let rows = self
                         .store
@@ -1282,11 +1348,42 @@ impl Engine {
                     self.sync_mailbox(mailbox);
                 }
             }
-            Internal::Body(id, body) => {
-                if let Err(e) = self.store.store_body(id, &body) {
-                    return self.fail(None, e);
+            Internal::Body { id, account, ahead, result } => {
+                self.bodies_fetching.remove(&id);
+                let awaited = self.bodies_awaited.remove(&id);
+                if ahead {
+                    self.prefetching.remove(&account);
                 }
-                self.emit(Event::BodyReady(id));
+                match result {
+                    Ok(body) => {
+                        let started = std::time::Instant::now();
+                        if let Err(e) = self.store.store_body(id, &body) {
+                            return self.fail(None, e);
+                        }
+                        if started.elapsed() >= Duration::from_millis(100) {
+                            info!(id = id.0, took = ?started.elapsed(), "slow body store");
+                        }
+                        self.emit(Event::BodyReady(id));
+                    }
+                    Err(error) if ahead => {
+                        debug!(id = id.0, "downloading ahead failed: {error}");
+                        if awaited {
+                            // Someone opened it meanwhile: fetch it for real, errors and all.
+                            self.fetch_body(id);
+                        }
+                        if matches!(error, Error::Network(_) | Error::Auth(_)) {
+                            // Wait for the next sync (or reconnect) to start again.
+                            return;
+                        }
+                        self.prefetch_failed.insert(id);
+                    }
+                    Err(error) => {
+                        return self.internal(Internal::Failed { account: Some(account), mailbox: None, error });
+                    }
+                }
+                if ahead {
+                    self.prefetch(account);
+                }
             }
             Internal::Push(account, PushEvent::MailboxChanged { remote_id }) => {
                 let target = self

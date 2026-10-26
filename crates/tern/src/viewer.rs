@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -33,7 +34,21 @@ pub struct Viewer {
     current: Cell<Option<MessageId>>,
     allow_remote: RefCell<HashSet<MessageId>>,
     unsubscribe: RefCell<Option<String>>,
+    opening: Cell<Option<Opening>>,
 }
+
+/// Timing of the message being opened, logged when it's slow.
+#[derive(Clone, Copy)]
+struct Opening {
+    id: MessageId,
+    started: Instant,
+    /// When the body was in hand (from the cache, or once the engine fetched it).
+    body_at: Option<Instant>,
+    cached: bool,
+}
+
+/// Opening a message slower than this gets a log line with where the time went.
+const SLOW_OPEN: Duration = Duration::from_millis(300);
 
 fn header_button(icon: &str, tip: &str, action: &str) -> gtk::Button {
     gtk::Button::builder().icon_name(icon).tooltip_text(tip).action_name(action).build()
@@ -162,6 +177,7 @@ impl Viewer {
             webview,
             loading,
             current: Cell::new(None),
+            opening: Cell::new(None),
             allow_remote: RefCell::new(HashSet::new()),
             unsubscribe: RefCell::new(None),
         }
@@ -219,6 +235,10 @@ impl Viewer {
 
         // Body: from cache, or ask the engine and show a spinner.
         let body = ui.store.borrow().body(id).ok().flatten();
+        if !same {
+            let started = Instant::now();
+            self.opening.set(Some(Opening { id, started, body_at: None, cached: body.is_some() }));
+        }
         match body {
             Some(b) => self.render(ui, id, &b),
             None => {
@@ -245,6 +265,9 @@ impl Viewer {
     }
 
     fn render(&self, ui: &Rc<Ui>, id: MessageId, body: &MessageBody) {
+        if let Some(o) = self.opening.get().filter(|o| o.id == id && o.body_at.is_none()) {
+            self.opening.set(Some(Opening { body_at: Some(Instant::now()), ..o }));
+        }
         self.loading.set_visible(false);
         self.loading.set_spinning(false);
         self.webview.set_visible(true);
@@ -342,6 +365,25 @@ fn open_uri(window: &impl IsA<gtk::Window>, uri: &str) {
 
 pub fn connect(ui: &Rc<Ui>) {
     let v = &ui.viewer;
+
+    {
+        let weak = Rc::downgrade(ui);
+        v.webview.connect_load_changed(move |_, event| {
+            if event != webkit::LoadEvent::Finished {
+                return;
+            }
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(o) = ui.viewer.opening.take() else { return };
+            let total = o.started.elapsed();
+            if total >= SLOW_OPEN {
+                let body = o.body_at.map(|t| t - o.started).unwrap_or_default();
+                tracing::info!(
+                    id = o.id.0, cached = o.cached, ?total, waiting_for_body = ?body, rendering = ?(total - body),
+                    "slow message open"
+                );
+            }
+        });
+    }
 
     // Links open in the default browser; the view itself never navigates.
     {

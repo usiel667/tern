@@ -21,6 +21,21 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-25 — Opening a message still took ~0.5 s (and some downloaded twice)
+
+**Seen:** with the slow-open log (`slow message open` / `slow body fetch`, kept in), typical
+messages (12–150 KB) took 0.4–0.6 s, about 90% of it waiting for Gmail and 2–100 ms rendering;
+a 1.8 MB one 1.2 s and a 17 MB one 2.1 s. Some messages were fetched twice: the viewer asks
+again while the first download is still running.
+
+**Fixed:** bodies are downloaded ahead in the background (`Engine::prefetch`): newest first
+from the inboxes and every mailbox the user opens, one at a time per account, on its own IMAP
+connection (`prefetch_body`), not counted as busy, skipping messages over 5 MB
+(`PREFETCH_MAX_SIZE`). A copy of a message with the same Message-ID shares its body
+(`Store::body`), so Gmail's All Mail copy needn't be downloaded again. A body already on its
+way isn't fetched a second time (`bodies_fetching`). Still open: big messages download whole,
+attachments and all, when opened.
+
 ## 2026-10-23 — Opening a message could wait behind a whole sync round
 
 **Seen:** on the real Gmail account, a sync round with nothing new took 9–17 s (18

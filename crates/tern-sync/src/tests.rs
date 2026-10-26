@@ -112,7 +112,8 @@ impl MailBackend for Fake {
             more: n2 < all.len(),
         })
     }
-    async fn fetch_body(&self, _: &str, rid: &str) -> Result<MessageBody> {
+    async fn fetch_body(&self, mb: &str, rid: &str) -> Result<MessageBody> {
+        self.log.lock().unwrap().push(format!("body {mb} {rid}"));
         Ok(tern_core::mime::body_from_raw(format!("Subject: x\r\n\r\nbody of {rid}").into_bytes()))
     }
     async fn set_flags(&self, mb: &str, rids: &[String], flags: &Flags) -> Result<()> {
@@ -309,6 +310,38 @@ async fn body_fetch_is_cached() {
     engine.handle(Command::FetchBody(msg));
     assert!(matches!(rx.try_recv(), Ok(Event::BodyReady(_))), "served from cache synchronously");
     drop(fake);
+}
+
+fn body_fetches(fake: &Fake) -> Vec<String> {
+    fake.log.lock().unwrap().iter().filter(|l| l.starts_with("body")).cloned().collect()
+}
+
+#[tokio::test]
+async fn inbox_bodies_download_ahead() {
+    let (engine, fake, _rx, id) = setup().await;
+    for m in engine.store().list(&ListScope::Mailbox(inbox(&engine, id)), false, 50).unwrap() {
+        assert!(engine.store().body(m.id).unwrap().is_some(), "{} not downloaded", m.envelope.subject);
+    }
+    let mut fetched = body_fetches(&fake);
+    fetched.sort();
+    assert_eq!(fetched, ["body INBOX 1", "body INBOX 2"], "each once, newest first doesn't matter here");
+}
+
+#[tokio::test]
+async fn opening_twice_downloads_once() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    // Trash isn't downloaded ahead until it's opened.
+    fake.boxes.lock().unwrap().insert("Trash".into(), vec![env(7, "Old", true)]);
+    let trash = engine.store().mailbox_by_role(id, MailboxRole::Trash).unwrap().unwrap().id;
+    engine.sync_mailbox(trash);
+    engine.settle().await;
+    assert!(!body_fetches(&fake).iter().any(|l| l.starts_with("body Trash")));
+    let msg = engine.store().list(&ListScope::Mailbox(trash), false, 50).unwrap()[0].id;
+    engine.handle(Command::FetchBody(msg));
+    engine.handle(Command::FetchBody(msg));
+    engine.settle().await;
+    assert!(engine.store().body(msg).unwrap().is_some());
+    assert_eq!(body_fetches(&fake).iter().filter(|l| l.starts_with("body Trash")).count(), 1);
 }
 
 fn draft_with_bcc() -> Draft {

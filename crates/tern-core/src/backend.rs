@@ -92,6 +92,12 @@ pub trait MailBackend: Send + Sync {
 
     async fn fetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody>;
 
+    /// `fetch_body` for downloading ahead in the background. Backends with a fixed number of
+    /// connections give it its own, so it never delays a message being opened.
+    async fn prefetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
+        self.fetch_body(mailbox, remote_id).await
+    }
+
     async fn set_flags(&self, mailbox: &str, remote_ids: &[String], flags: &Flags) -> Result<()>;
 
     /// Move messages; returns new remote ids in the destination when the server reports them.

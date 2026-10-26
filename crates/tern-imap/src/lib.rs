@@ -1,8 +1,9 @@
 //! IMAP4rev1 backend.
 //!
-//! Three connections per account: one for sync and other commands, one for opening
+//! Four connections per account: one for sync and other commands, one for opening
 //! messages (so a click never waits behind a sync round, which takes ~17 s on a big Gmail
-//! account), and one that sits in IDLE on the inbox for push. Sync is UID-based and works on any
+//! account), one for downloading bodies ahead in the background, and one that sits in IDLE
+//! on the inbox for push. Sync is UID-based and works on any
 //! server; CONDSTORE/QRESYNC are an optimisation to add later (see md/PLAN.md).
 
 mod connect;
@@ -93,6 +94,8 @@ pub struct ImapBackend {
     cmd: Mutex<Option<Conn>>,
     /// Only for `fetch_body`.
     body: Mutex<Option<Conn>>,
+    /// Only for `prefetch_body`.
+    prefetch: Mutex<Option<Conn>>,
     idle: Mutex<Option<Session>>,
     /// Extensions we're allowed to use even if the server offers more (tests).
     allowed: std::sync::Mutex<Extensions>,
@@ -107,6 +110,7 @@ impl ImapBackend {
             cred,
             cmd: Mutex::new(None),
             body: Mutex::new(None),
+            prefetch: Mutex::new(None),
             idle: Mutex::new(None),
             allowed: std::sync::Mutex::new(Extensions::ALL),
             sync_count: Default::default(),
@@ -120,6 +124,7 @@ impl ImapBackend {
         *self.allowed.lock().unwrap() = ext;
         *self.cmd.lock().await = None;
         *self.body.lock().await = None;
+        *self.prefetch.lock().await = None;
     }
 
     /// Read-only export: every message in `mailbox` as raw RFC 822 bytes, oldest UID first,
@@ -233,6 +238,27 @@ impl ImapBackend {
             *guard = None;
         }
         result
+    }
+
+    /// Download a whole message on the connection in `lane`.
+    async fn body_on(&self, lane: &Mutex<Option<Conn>>, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
+        self.on(lane, async |c| {
+            c.open(mailbox).await?;
+            let s = &mut c.session;
+            let fetches: Vec<Fetch> = s
+                .uid_fetch(remote_id, "(UID BODY.PEEK[])")
+                .await
+                .map_err(cmd)?
+                .try_collect()
+                .await
+                .map_err(cmd)?;
+            let raw = fetches
+                .iter()
+                .find_map(|f| f.body())
+                .ok_or_else(|| Error::NotFound(format!("uid {remote_id} in {mailbox}")))?;
+            Ok(body_from_raw(raw.to_vec()))
+        })
+        .await
     }
 }
 
@@ -567,23 +593,11 @@ impl MailBackend for ImapBackend {
     }
 
     async fn fetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
-        self.on(&self.body, async |c| {
-            c.open(mailbox).await?;
-            let s = &mut c.session;
-            let fetches: Vec<Fetch> = s
-                .uid_fetch(remote_id, "(UID BODY.PEEK[])")
-                .await
-                .map_err(cmd)?
-                .try_collect()
-                .await
-                .map_err(cmd)?;
-            let raw = fetches
-                .iter()
-                .find_map(|f| f.body())
-                .ok_or_else(|| Error::NotFound(format!("uid {remote_id} in {mailbox}")))?;
-            Ok(body_from_raw(raw.to_vec()))
-        })
-        .await
+        self.body_on(&self.body, mailbox, remote_id).await
+    }
+
+    async fn prefetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
+        self.body_on(&self.prefetch, mailbox, remote_id).await
     }
 
     async fn set_flags(&self, mailbox: &str, remote_ids: &[String], flags: &Flags) -> Result<()> {

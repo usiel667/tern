@@ -2936,6 +2936,7 @@ dependencies = [
  "tern-store",
  "tern-sync",
  "tokio",
+ "tracing",
  "tracing-subscriber",
  "webkit6",
  "zip",

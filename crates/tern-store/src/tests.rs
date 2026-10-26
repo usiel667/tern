@@ -544,6 +544,35 @@ fn migrates_v5_mailboxes_to_v6() {
 }
 
 #[test]
+fn copies_share_a_body_and_prefetch_skips_them() {
+    let mut s = Store::open_in_memory().unwrap();
+    let acct = AccountId::new();
+    let mb = |rid: &str, role| RemoteMailbox { remote_id: rid.into(), name: rid.into(), parent_remote_id: None, role, selectable: true };
+    s.sync_mailboxes(acct, &[mb("INBOX", MailboxRole::Inbox), mb("[Gmail]/All Mail", MailboxRole::All)]).unwrap();
+    let id = |s: &Store, role| s.mailboxes(Some(acct)).unwrap().into_iter().find(|m| m.remote.role == role).unwrap().id;
+    let (inbox, all) = (id(&s, MailboxRole::Inbox), id(&s, MailboxRole::All));
+    let mut big = env("3", "<c@x>", None, "Video", "Bob", 3);
+    big.size = 20_000_000;
+    s.apply_delta(inbox, &MailboxDelta {
+        added: vec![env("1", "<a@x>", None, "Old", "Ann", 1), env("2", "<b@x>", None, "New", "Ann", 2), big],
+        ..Default::default()
+    })
+    .unwrap();
+    s.apply_delta(all, &MailboxDelta { added: vec![env("9", "<b@x>", None, "New", "Ann", 2)], ..Default::default() }).unwrap();
+    let row = |s: &Store, mb, rid: &str| {
+        s.list(&ListScope::Mailbox(mb), false, 10).unwrap().into_iter().find(|m| m.envelope.remote_id == rid).unwrap().id
+    };
+    let (old, new, copy) = (row(&s, inbox, "1"), row(&s, inbox, "2"), row(&s, all, "9"));
+
+    assert_eq!(s.bodies_wanted(inbox, 5_000_000, 10).unwrap(), vec![new, old], "newest first, not the 20 MB one");
+    let body = MessageBody { text: Some("hello".into()), html: None, attachments: vec![], list_unsubscribe: None, list_unsubscribe_post: false, raw: b"x".to_vec() };
+    s.store_body(copy, &body).unwrap();
+    assert_eq!(s.body(new).unwrap().and_then(|b| b.text).as_deref(), Some("hello"), "the All Mail copy's body");
+    assert_eq!(s.bodies_wanted(inbox, 5_000_000, 10).unwrap(), vec![old]);
+    assert!(s.body(old).unwrap().is_none());
+}
+
+#[test]
 fn full_resync_updates_in_place_unless_renumbered() {
     let (mut s, _, inbox, _) = setup();
     let full = |added: Vec<Envelope>, ids_invalidated| MailboxDelta { added, full_resync: true, ids_invalidated, ..Default::default() };

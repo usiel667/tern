@@ -137,6 +137,9 @@ async fn full_cycle() {
     let again = b.fetch_body(&inbox, &uids[0]).await.unwrap();
     println!("fetch_body: {switching:?} first, {:?} already selected", started.elapsed());
     assert!(again.text.unwrap().contains("Body number 1"));
+    // Downloading ahead uses its own connection; same result.
+    let ahead = b.prefetch_body(&inbox, &uids[0]).await.unwrap();
+    assert!(ahead.text.unwrap().contains("Body number 1"));
 
     // New mail arrives → picked up incrementally.
     let appended = b.append(&inbox, &message(4, "Live 4"), &Flags::default()).await.unwrap();

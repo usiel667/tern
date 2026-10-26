@@ -274,6 +274,11 @@ impl MailBackend for DemoBackend {
 
     async fn fetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
         tokio::time::sleep(Duration::from_millis(150)).await; // feel like a network
+        self.prefetch_body(mailbox, remote_id).await
+    }
+
+    /// No pretend delay: hundreds of these run in tests.
+    async fn prefetch_body(&self, mailbox: &str, remote_id: &str) -> Result<MessageBody> {
         let boxes = self.boxes.lock().unwrap();
         let raw = boxes
             .values()

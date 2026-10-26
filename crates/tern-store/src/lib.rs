@@ -493,11 +493,16 @@ impl Store {
             .map_err(db)
     }
 
+    /// The message's body, or that of another copy of it (same Message-ID, same account:
+    /// on Gmail a message is in Inbox and All Mail at once) that has one.
     pub fn body(&self, id: MessageId) -> Result<Option<MessageBody>> {
         let row: Option<(Option<String>, Option<String>, Option<String>, Option<Vec<u8>>)> = self
             .conn
             .query_row(
-                "SELECT body_text, body_html, body_meta, raw FROM messages WHERE id = ?1",
+                "SELECT c.body_text, c.body_html, c.body_meta, c.raw FROM messages m JOIN messages c
+                   ON c.id = m.id OR (c.account = m.account AND c.message_id = m.message_id)
+                 WHERE m.id = ?1 AND c.body_meta IS NOT NULL
+                 ORDER BY c.id = m.id DESC LIMIT 1",
                 [id.0],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
@@ -515,6 +520,27 @@ impl Store {
             list_unsubscribe_post: meta["list_unsubscribe_post"].as_bool().unwrap_or(false),
             raw: raw.unwrap_or_default(),
         }))
+    }
+
+    /// Messages in `mailbox` worth downloading ahead of time, newest first: no body yet (in
+    /// any copy, see `body`) and at most `max_size` bytes.
+    pub fn bodies_wanted(&self, mailbox: MailboxId, max_size: u64, limit: usize) -> Result<Vec<MessageId>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(
+                "SELECT m.id FROM messages m
+                 WHERE m.mailbox = ?1 AND m.body_meta IS NULL AND m.size <= ?2
+                   AND NOT EXISTS (SELECT 1 FROM messages c WHERE c.message_id = m.message_id
+                                   AND c.account = m.account AND c.body_meta IS NOT NULL)
+                 ORDER BY m.date DESC LIMIT ?3",
+            )
+            .map_err(db)?;
+        let ids = stmt
+            .query_map(params![mailbox.0, max_size as i64, limit as i64], |r| Ok(MessageId(r.get(0)?)))
+            .map_err(db)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(db)?;
+        Ok(ids)
     }
 
     pub fn store_body(&mut self, id: MessageId, body: &MessageBody) -> Result<()> {
