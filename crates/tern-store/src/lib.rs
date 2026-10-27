@@ -39,10 +39,13 @@ const SUMMARY_COLS: &str = "m.id, m.account, m.mailbox, m.thread_id, m.remote_id
 /// All Mail too, often in Important and Starred, and a message you sent yourself is in Sent and
 /// Inbox. Lists keep one copy per Message-ID (messages without one always count), preferring a
 /// real mailbox over those catch-alls.
+///
+/// Only the summary columns go through the window sort: `m.*` would drag every cached body
+/// along (1.4 s to list a 1,250-message Inbox once bodies were downloaded ahead).
 fn one_copy(filter: &str) -> String {
     format!(
         "SELECT * FROM (
-             SELECT m.*, ROW_NUMBER() OVER (
+             SELECT {SUMMARY_COLS}, ROW_NUMBER() OVER (
                  PARTITION BY m.account, COALESCE(m.message_id, 'row:' || m.id)
                  ORDER BY CASE b.role WHEN 'all' THEN 2 WHEN 'important' THEN 1 WHEN 'flagged' THEN 1 ELSE 0 END, m.id
              ) AS copy_rank

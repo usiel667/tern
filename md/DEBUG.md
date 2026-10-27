@@ -21,6 +21,22 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-26 — Inbox messages took ~2 s to open after bodies were downloaded ahead
+
+**Seen:** after the download-ahead (below) filled in every Inbox body, opening an Inbox message
+took 1.3–2.6 s, all of it logged as `rendering`; other folders and the demo stayed fast. The same
+HTML in a bare WebKitGTK view (test display and real display) loaded in 3–60 ms, so WebKit
+wasn't it: Tern's main thread was busy while the page loaded.
+
+**Cause:** opening an unread message marks it read, which reloads the list, and `Store::list`
+for the Inbox took 1.4 s (0.36 s without conversations). `one_copy` selected `m.*` into its
+`ROW_NUMBER()` window, so every cached `body_html`/`raw` went through the sort. Before the
+download-ahead almost no Inbox rows had a body, which hid it.
+
+**Fixed:** `one_copy` selects `SUMMARY_COLS` only (all four callers read just those): 14 ms with
+conversations, 5 ms without, on a copy of the same database. Lesson: anything that puts big
+columns on hot rows needs the list queries re-timed.
+
 ## 2026-10-25 — Opening a message still took ~0.5 s (and some downloaded twice)
 
 **Seen:** with the slow-open log (`slow message open` / `slow body fetch`, kept in), typical
