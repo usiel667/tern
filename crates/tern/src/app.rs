@@ -15,6 +15,19 @@ use crate::sidebar::Sidebar;
 use crate::viewer::Viewer;
 use crate::{Args, accounts, compose};
 
+/// A main-thread step slower than this gets a log line (it holds up drawing and input).
+const SLOW_STEP: std::time::Duration = std::time::Duration::from_millis(30);
+
+pub(crate) fn timed<T>(step: &str, f: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = f();
+    let took = started.elapsed();
+    if took >= SLOW_STEP {
+        tracing::info!(step, ?took, "slow ui step");
+    }
+    out
+}
+
 pub struct Ui {
     pub app: adw::Application,
     pub window: adw::ApplicationWindow,
@@ -256,7 +269,7 @@ impl Ui {
         let ui = self.clone();
         glib::idle_add_local_once(move || {
             ui.reload_pending.set(false);
-            ui.reload_list();
+            timed("list reload", || ui.reload_list());
         });
     }
 
@@ -267,8 +280,10 @@ impl Ui {
         let ui = self.clone();
         glib::idle_add_local_once(move || {
             ui.sidebar_pending.set(false);
-            ui.sidebar.rebuild(&ui);
-            ui.update_title();
+            timed("sidebar rebuild", || {
+                ui.sidebar.rebuild(&ui);
+                ui.update_title();
+            });
         });
     }
 

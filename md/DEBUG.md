@@ -37,6 +37,15 @@ download-ahead almost no Inbox rows had a body, which hid it.
 conversations, 5 ms without, on a copy of the same database. Lesson: anything that puts big
 columns on hot rows needs the list queries re-timed.
 
+**Then still ~0.5 s, and the list jumped to the top on every open:** a new `slow ui step` log
+(main-thread steps ≥ 30 ms) showed each list reload took ~400 ms with a 15 ms query: `reload`
+swapped all 500 rows into the model, so GTK rebuilt the list, and replacing the focused row
+resets the ListView's scroll. Reload now updates rows in place when the same messages are in
+the same order (replace the boxed value, redraw the visible row widget), and otherwise splices
+only the changed stretch; restoring the selection no longer re-renders the viewer. Opens are
+now under 0.3 s and reloads under 30 ms. **Still open:** deleting a message scrolls the list
+to the top (it did before too); restoring the adjustment value in an idle didn't help.
+
 ## 2026-10-25 — Opening a message still took ~0.5 s (and some downloaded twice)
 
 **Seen:** with the slow-open log (`slow message open` / `slow body fetch`, kept in), typical

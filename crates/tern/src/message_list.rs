@@ -1,6 +1,6 @@
 //! The middle pane: search field, message rows, empty/welcome states.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -32,6 +32,10 @@ pub struct MessageList {
     limit: Cell<u32>,
     /// The last reload hit `limit`, so the cache has more rows to show.
     more_cached: Cell<bool>,
+    /// A reload is putting the selection back; the viewer already shows it.
+    restoring: Cell<bool>,
+    /// Every row widget the factory made, to redraw one in place.
+    rows: RefCell<Vec<glib::WeakRef<gtk::Box>>>,
 }
 
 /// Rows loaded per page of the cached list.
@@ -48,6 +52,8 @@ struct RowWidgets {
     flag: gtk::Box,
     attachment: gtk::Image,
     replied: gtk::Image,
+    /// The message this row shows right now (rows are recycled while scrolling).
+    id: Cell<Option<MessageId>>,
 }
 
 impl MessageList {
@@ -148,6 +154,8 @@ impl MessageList {
             scroller,
             limit: Cell::new(PAGE),
             more_cached: Cell::new(false),
+            restoring: Cell::new(false),
+            rows: RefCell::new(vec![]),
         }
     }
 
@@ -260,14 +268,34 @@ pub fn reload(ui: &Rc<Ui>) {
     }
 
     let keep: Vec<(MessageId, Option<i64>)> = selected(ui).iter().map(|m| (m.id, m.thread_id)).collect();
-    let objs: Vec<glib::BoxedAnyObject> = rows.iter().cloned().map(glib::BoxedAnyObject::new).collect();
-    ui.list.model.splice(0, ui.list.model.n_items(), &objs);
+    // Touch only the rows that changed. Swapping in all of them rebuilt the whole list
+    // (~0.4 s for 500 rows), and replacing the focused row scrolls the list back to the top.
+    let old: Vec<Option<MessageSummary>> =
+        (0..ui.list.model.n_items()).map(|i| ui.list.model.item(i).as_ref().and_then(item_summary)).collect();
+    let same = |a: &Option<MessageSummary>, b: &MessageSummary| a.as_ref() == Some(b);
+    if old.len() == rows.len() && old.iter().zip(&rows).all(|(a, b)| a.as_ref().map(|a| a.id) == Some(b.id)) {
+        // Same messages in the same order (a flag or preview changed): update in place.
+        for (i, m) in rows.iter().enumerate().filter(|(i, m)| !same(&old[*i], m)) {
+            if let Some(obj) = ui.list.model.item(i as u32).and_downcast::<glib::BoxedAnyObject>() {
+                obj.replace(m.clone());
+            }
+            redraw_row(ui, m);
+        }
+    } else {
+        let head = old.iter().zip(&rows).take_while(|(a, b)| same(a, b)).count();
+        let tail = old[head..].iter().rev().zip(rows[head..].iter().rev()).take_while(|(a, b)| same(a, b)).count();
+        let objs: Vec<glib::BoxedAnyObject> =
+            rows[head..rows.len() - tail].iter().cloned().map(glib::BoxedAnyObject::new).collect();
+        ui.list.model.splice(head as u32, (old.len() - head - tail) as u32, &objs);
+    }
+    ui.list.restoring.set(true);
     for (i, m) in rows.iter().enumerate() {
         let hit = keep.iter().any(|(id, tid)| *id == m.id || (ui.conversations.get() && tid.is_some() && *tid == m.thread_id));
-        if hit {
+        if hit && !ui.list.selection.is_selected(i as u32) {
             ui.list.selection.select_item(i as u32, false);
         }
     }
+    ui.list.restoring.set(false);
 
     // The real size of a mailbox view, not just the rows paged in so far.
     let filtered = !query.trim().is_empty() || ui.list.unread_btn.is_active();
@@ -288,6 +316,19 @@ pub fn reload(ui: &Rc<Ui>) {
         ui.list.stack.set_visible_child_name("empty");
     } else {
         ui.list.stack.set_visible_child_name("list");
+    }
+}
+
+/// Redraw the on-screen row showing `m`, if there is one.
+fn redraw_row(ui: &Ui, m: &MessageSummary) {
+    for root in ui.list.rows.borrow().iter().filter_map(|r| r.upgrade()) {
+        // SAFETY: set in `connect_setup` with this exact type.
+        if let Some(w) = unsafe { root.data::<RowWidgets>("row") } {
+            let w = unsafe { w.as_ref() };
+            if w.id.get() == Some(m.id) {
+                bind_row(w, m, ui.conversations.get());
+            }
+        }
     }
 }
 
@@ -379,10 +420,12 @@ fn build_row() -> (gtk::Box, RowWidgets) {
     root.add_css_class("message-row");
     root.append(&dot);
     root.append(&text);
-    (root, RowWidgets { dot, sender, date, subject, preview, count, flag, attachment, replied })
+    let id = Cell::new(None);
+    (root, RowWidgets { dot, sender, date, subject, preview, count, flag, attachment, replied, id })
 }
 
 fn bind_row(w: &RowWidgets, m: &MessageSummary, conversations: bool) {
+    w.id.set(Some(m.id));
     let e = &m.envelope;
     if e.flags.seen {
         w.dot.add_css_class("read");
@@ -462,6 +505,11 @@ pub fn connect(ui: &Rc<Ui>) {
             let (root, widgets) = build_row();
             // SAFETY: the key is only read back as `RowWidgets` in `connect_bind`.
             unsafe { root.set_data("row", widgets) };
+            if let Some(ui) = weak.upgrade() {
+                let mut rows = ui.list.rows.borrow_mut();
+                rows.retain(|r| r.upgrade().is_some());
+                rows.push(root.downgrade());
+            }
 
             // Right-click: select this row if needed, then show the context menu.
             let popover = gtk::PopoverMenu::from_model(Some(&menu));
@@ -518,6 +566,13 @@ pub fn connect(ui: &Rc<Ui>) {
             }
         });
     }
+    factory.connect_unbind(|_, obj| {
+        let item = obj.downcast_ref::<gtk::ListItem>().expect("list item");
+        // SAFETY: set in `connect_setup` with this exact type.
+        if let Some(w) = item.child().and_then(|root| unsafe { root.data::<RowWidgets>("row") }) {
+            unsafe { w.as_ref() }.id.set(None);
+        }
+    });
 
     // Selection drives the viewer.
     {
@@ -526,8 +581,9 @@ pub fn connect(ui: &Rc<Ui>) {
             let Some(ui) = weak.upgrade() else { return };
             let rows = selected(&ui);
             match rows.as_slice() {
+                [one] if ui.list.restoring.get() && ui.viewer.current() == Some(one.id) => {}
                 [one] => {
-                    ui.viewer.show(&ui, one.id);
+                    crate::app::timed("show message", || ui.viewer.show(&ui, one.id));
                     if ui.split.is_collapsed() {
                         ui.split.set_show_content(true);
                     }
