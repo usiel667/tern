@@ -9,7 +9,7 @@
 mod connect;
 mod state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
@@ -101,6 +101,9 @@ pub struct ImapBackend {
     allowed: std::sync::Mutex<Extensions>,
     /// Incremental syncs per mailbox this session, for the periodic full check.
     sync_count: std::sync::Mutex<HashMap<String, u32>>,
+    /// Mailboxes IDLE said changed since their last sync. Their next sync doesn't trust
+    /// STATUS: Gmail's lags about 10 s behind changes made on other connections.
+    pushed: std::sync::Mutex<HashSet<String>>,
 }
 
 impl ImapBackend {
@@ -114,7 +117,14 @@ impl ImapBackend {
             idle: Mutex::new(None),
             allowed: std::sync::Mutex::new(Extensions::ALL),
             sync_count: Default::default(),
+            pushed: Default::default(),
         }
+    }
+
+    /// Test switch: as if IDLE had just reported a change in `mailbox`.
+    #[doc(hidden)]
+    pub fn mark_pushed(&self, mailbox: &str) {
+        self.pushed.lock().unwrap().insert(mailbox.to_string());
     }
 
     /// Test switch: behave as if the server offered at most `ext`. Drops the
@@ -353,6 +363,21 @@ fn full_check_due(nth_sync: u32) -> bool {
     nth_sync.is_multiple_of(FULL_CHECK_EVERY)
 }
 
+/// Whether STATUS shows the mailbox exactly as `prev` recorded it, so a sync can stop
+/// there. Flag changes raise HIGHESTMODSEQ, new mail raises UIDNEXT, and an expunge
+/// without new mail lowers the count. Needs CONDSTORE and a v3 cursor. Gmail's
+/// HIGHESTMODSEQ is account-wide, so there this fires only while the whole account is quiet.
+/// Gmail's STATUS also lags ~10 s behind other connections; that only delays a change to
+/// the next sync (the cursor stays put), and pushed mailboxes skip this check.
+fn unchanged_since(prev: &ImapState, now: &async_imap::types::Mailbox) -> bool {
+    prev.modseq != 0
+        && prev.uid_next != 0
+        && now.uid_validity == Some(prev.uid_validity)
+        && now.highest_modseq == Some(prev.modseq)
+        && now.uid_next == Some(prev.uid_next)
+        && now.exists == prev.exists
+}
+
 /// How an incremental sync checks the cached window for flag changes and deletions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SyncMode {
@@ -464,14 +489,30 @@ impl MailBackend for ImapBackend {
     ) -> Result<MailboxDelta> {
         self.with_conn(async |c| {
             let ext = c.ext;
+            let prev = since.and_then(|st| ImapState::decode(&st.0));
+            let pushed = self.pushed.lock().unwrap().remove(mailbox);
+            let full_check = prev.is_some() && {
+                let mut counts = self.sync_count.lock().unwrap();
+                let n = counts.entry(mailbox.to_string()).or_default();
+                *n += 1;
+                full_check_due(*n)
+            };
             // Counts for the whole mailbox (only part of it is cached). Asked before SELECT,
             // since STATUS on the selected mailbox is discouraged; a failure just means none.
-            let counts = c
-                .session
-                .status(mailbox, "(MESSAGES UNSEEN)")
-                .await
-                .ok()
-                .and_then(|st| Some(MailboxCounts { total: st.exists, unread: st.unseen? }));
+            let items = if ext.condstore {
+                "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ)"
+            } else {
+                "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"
+            };
+            let status = c.session.status(mailbox, items).await.ok();
+            let counts = status.as_ref().and_then(|st| Some(MailboxCounts { total: st.exists, unread: st.unseen? }));
+            if let (Some(p), Some(st)) = (&prev, &status)
+                && !full_check
+                && !pushed
+                && unchanged_since(p, st)
+            {
+                return Ok(MailboxDelta { counts, new_state: SyncState(p.encode()), ..Default::default() });
+            }
             let mb = c.reselect(mailbox, ext.condstore).await?;
             let s = &mut c.session;
             let validity = mb.uid_validity.unwrap_or(0);
@@ -479,7 +520,7 @@ impl MailBackend for ImapBackend {
             // while we're fetching has a higher modseq and is seen again next time.
             // 0 = unknown (no CONDSTORE, or a NOMODSEQ mailbox).
             let modseq_now = if ext.condstore { mb.highest_modseq.unwrap_or(0) } else { 0 };
-            let prev = since.and_then(|st| ImapState::decode(&st.0));
+            let uid_next = mb.uid_next.unwrap_or(0);
             let mut delta = MailboxDelta {
                 ids_invalidated: prev.as_ref().is_some_and(|p| p.uid_validity != validity),
                 counts,
@@ -511,19 +552,19 @@ impl MailBackend for ImapBackend {
                         low_uid: uids.clone().min().unwrap_or(1),
                         high_uid: uids.max().unwrap_or(0),
                         modseq: modseq_now,
+                        uid_next,
+                        exists: mb.exists,
                     };
                     delta.added = added;
                     delta.new_state = SyncState(st.encode());
                 }
                 Some(p) => {
-                    let mut st = ImapState { modseq: modseq_now, ..p.clone() };
-                    let nth = {
-                        let mut counts = self.sync_count.lock().unwrap();
-                        let n = counts.entry(mailbox.to_string()).or_default();
-                        *n += 1;
-                        *n
-                    };
-                    let mode = sync_mode(ext, p.modseq, modseq_now, full_check_due(nth));
+                    let mut st = ImapState { modseq: modseq_now, uid_next, exists: mb.exists, ..p.clone() };
+                    let mode = sync_mode(ext, p.modseq, modseq_now, full_check);
+                    // Same UIDNEXT: no new mail since the last SELECT. Same count too: nothing
+                    // expunged either, so the deletion check can be skipped.
+                    let no_new_mail = p.uid_next != 0 && uid_next == p.uid_next;
+                    let none_removed = no_new_mail && mb.exists == p.exists;
                     // Nothing changed and no new mail: no per-message traffic at all.
                     if mode == SyncMode::Qresync
                         && modseq_now == p.modseq
@@ -533,13 +574,16 @@ impl MailBackend for ImapBackend {
                         return Ok(delta);
                     }
                     // New mail. `N:*` always returns at least the last message, so filter.
-                    let fetches: Vec<Fetch> = s
-                        .uid_fetch(format!("{}:*", p.high_uid + 1), ENVELOPE_ITEMS)
-                        .await
-                        .map_err(cmd)?
-                        .try_collect()
-                        .await
-                        .map_err(cmd)?;
+                    let fetches: Vec<Fetch> = if no_new_mail {
+                        Vec::new()
+                    } else {
+                        s.uid_fetch(format!("{}:*", p.high_uid + 1), ENVELOPE_ITEMS)
+                            .await
+                            .map_err(cmd)?
+                            .try_collect()
+                            .await
+                            .map_err(cmd)?
+                    };
                     for f in &fetches {
                         if f.uid.is_some_and(|u| u > p.high_uid)
                             && let Some(e) = envelope_of(f) {
@@ -573,6 +617,7 @@ impl MailBackend for ImapBackend {
                             SyncMode::Full => {
                                 delta.present = Some(delta.flags_changed.iter().map(|(u, _)| u.clone()).collect());
                             }
+                            SyncMode::Condstore if none_removed => {}
                             SyncMode::Condstore => {
                                 let found = s.uid_search(format!("UID {window}")).await.map_err(cmd)?;
                                 delta.present = Some(found.into_iter().map(|u| u.to_string()).collect());
@@ -751,9 +796,10 @@ impl MailBackend for ImapBackend {
         let session = idle.done().await.map_err(net)?;
         *guard = Some(session);
         match response.map_err(net)? {
-            IdleResponse::NewData(_) => Ok(Some(PushEvent::MailboxChanged {
-                remote_id: mailbox.to_string(),
-            })),
+            IdleResponse::NewData(_) => {
+                self.pushed.lock().unwrap().insert(mailbox.to_string());
+                Ok(Some(PushEvent::MailboxChanged { remote_id: mailbox.to_string() }))
+            }
             IdleResponse::Timeout | IdleResponse::ManualInterrupt => Ok(None),
         }
     }
@@ -868,6 +914,33 @@ mod tests {
         assert_eq!(sync_mode(Extensions::ALL, 100, 0, false), Full, "NOMODSEQ mailbox");
         assert_eq!(sync_mode(Extensions::ALL, 100, 90, false), Full, "counter went backwards");
         assert_eq!(sync_mode(Extensions::ALL, 100, 120, true), Full, "periodic full check");
+    }
+
+    #[test]
+    fn status_skips_only_a_mailbox_that_cannot_have_changed() {
+        let prev = ImapState { uid_validity: 7, low_uid: 1, high_uid: 40, modseq: 500, uid_next: 41, exists: 30 };
+        let now = async_imap::types::Mailbox {
+            uid_validity: Some(7),
+            highest_modseq: Some(500),
+            uid_next: Some(41),
+            exists: 30,
+            ..Default::default()
+        };
+        assert!(unchanged_since(&prev, &now));
+        let changed = |f: fn(&mut async_imap::types::Mailbox)| {
+            let mut m = now.clone();
+            f(&mut m);
+            unchanged_since(&prev, &m)
+        };
+        assert!(!changed(|m| m.highest_modseq = Some(501)), "flags changed");
+        assert!(!changed(|m| m.uid_next = Some(42)), "new mail, even if since deleted");
+        assert!(!changed(|m| m.exists = 29), "expunged");
+        assert!(!changed(|m| m.uid_validity = Some(8)), "renumbered");
+        assert!(!changed(|m| m.highest_modseq = None), "no CONDSTORE in the reply");
+        let v2 = ImapState { uid_next: 0, exists: 0, ..prev.clone() };
+        assert!(!unchanged_since(&v2, &async_imap::types::Mailbox { uid_next: Some(0), exists: 0, ..now.clone() }), "old cursor");
+        let no_condstore = ImapState { modseq: 0, ..prev };
+        assert!(!unchanged_since(&no_condstore, &async_imap::types::Mailbox { highest_modseq: Some(0), ..now }));
     }
 
     #[test]

@@ -222,18 +222,20 @@ async fn change_tracking() {
         println!("    using {name}");
         let uids: Vec<String> = d1.added.iter().map(|e| e.remote_id.clone()).collect();
 
-        // Idle mailbox.
+        // Idle mailbox: with tracking, nothing comes back, not even a deletion check.
         let d2 = b.sync_mailbox(&archive, Some(&d1.new_state), None).await.unwrap();
         assert!(d2.added.is_empty() && d2.removed.is_empty() && !d2.full_resync);
+        assert_eq!(d2.counts.map(|c| c.total), Some(3));
         match name {
-            "qresync" => assert!(d2.flags_changed.is_empty() && d2.present.is_none(), "{d2:?}"),
-            "condstore" => assert!(d2.flags_changed.is_empty() && d2.present.as_ref().unwrap().len() == 3),
-            _ => assert_eq!(d2.flags_changed.len(), 3),
+            "neither" => assert_eq!(d2.flags_changed.len(), 3),
+            _ => assert!(d2.flags_changed.is_empty() && d2.present.is_none(), "{d2:?}"),
         }
 
         // One message flagged elsewhere: only it comes back (all three without tracking).
         let red = Flags { seen: true, flag: Some(FlagColor::Red), ..Default::default() };
         other.set_flags(&archive, &uids[..1], &red).await.unwrap();
+        // Changes made elsewhere reach us by IDLE; without that, Gmail's STATUS can lag.
+        b.mark_pushed(&archive);
         let d3 = b.sync_mailbox(&archive, Some(&d2.new_state), None).await.unwrap();
         let expect = if name == "neither" { 3 } else { 1 };
         assert_eq!(d3.flags_changed.len(), expect, "{d3:?}");
@@ -246,6 +248,7 @@ async fn change_tracking() {
         };
         other.set_flags(&archive, &uids[1..2], &Flags { deleted: true, ..Default::default() }).await.unwrap();
         other.expunge(&archive).await.unwrap();
+        b.mark_pushed(&archive);
         let d4 = b.sync_mailbox(&archive, Some(&d3.new_state), None).await.unwrap();
         assert!(gone(&d4, &uids[1]), "{d4:?}");
         if name == "qresync" {
@@ -264,17 +267,51 @@ async fn change_tracking() {
         }
         other.set_flags(&archive, &uids[2..3], &Flags { deleted: true, ..Default::default() }).await.unwrap();
         other.expunge(&archive).await.unwrap();
+        b.mark_pushed(&archive);
         let d5 = b.sync_mailbox(&archive, Some(&d4.new_state), None).await.unwrap();
         assert!(gone(&d5, &uids[2]), "deletion seen after a long session: {d5:?}");
 
-        // A cursor from before change tracking (v1) upgrades without a re-download.
-        let v2 = &d5.new_state.0;
-        assert!(v2.starts_with("v2:"), "{v2}");
-        let parts: Vec<&str> = v2.split(':').collect();
+        // Older cursors (v1: before change tracking, v2: before UIDNEXT and the count)
+        // upgrade without a re-download.
+        let v3 = &d5.new_state.0;
+        assert!(v3.starts_with("v3:"), "{v3}");
+        let parts: Vec<&str> = v3.split(':').collect();
+        let v2 = tern_core::backend::SyncState(parts[..5].join(":").replacen("v3", "v2", 1));
+        let d = b.sync_mailbox(&archive, Some(&v2), None).await.unwrap();
+        assert!(!d.full_resync && d.added.is_empty() && d.new_state.0.starts_with("v3:"), "{d:?}");
         let v1 = tern_core::backend::SyncState(format!("v1:{}:{}:{}", parts[1], parts[2], parts[3]));
         let d6 = b.sync_mailbox(&archive, Some(&v1), None).await.unwrap();
         assert!(!d6.full_resync && d6.added.is_empty());
-        let modseq: u64 = d6.new_state.0.rsplit(':').next().unwrap().parse().unwrap();
+        let modseq: u64 = d6.new_state.0.split(':').nth(4).unwrap().parse().unwrap();
         assert_eq!(modseq > 0, name != "neither", "{}", d6.new_state.0);
     }
+}
+
+/// Gmail's STATUS lags behind other connections, so a sync right after a change made
+/// elsewhere may skip it. It must only be late: the cursor stays put and a later sync
+/// still delivers the change.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a live IMAP server (see file docs)"]
+async fn stale_status_only_delays_a_change() {
+    let port = env("TERN_IMAP_PORT").and_then(|p| p.parse().ok()).unwrap_or(993);
+    let b = backend(port, Security::Tls);
+    let other = backend(port, Security::Tls);
+    let archive = SCRATCH.to_string();
+    other.create_mailbox(&archive).await.expect("create scratch mailbox");
+    let mut d = b.sync_mailbox(&archive, None, None).await.unwrap();
+    if d.added.is_empty() {
+        other.append(&archive, &message(1, "Lag"), &Flags::default()).await.unwrap();
+        d = b.sync_mailbox(&archive, None, None).await.unwrap();
+    }
+    let (uid, seen) = (d.added[0].remote_id.clone(), !d.added[0].flags.seen);
+    other.set_flags(&archive, std::slice::from_ref(&uid), &Flags { seen, ..Default::default() }).await.unwrap();
+    // Right away: may or may not show up.
+    let mut state = b.sync_mailbox(&archive, Some(&d.new_state), None).await.unwrap();
+    let start = std::time::Instant::now();
+    while !state.flags_changed.iter().any(|(u, f)| *u == uid && f.seen == seen) {
+        assert!(start.elapsed() < Duration::from_secs(60), "flag change never arrived: {state:?}");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        state = b.sync_mailbox(&archive, Some(&state.new_state), None).await.unwrap();
+    }
+    println!("flag change arrived after {:?}", start.elapsed());
 }

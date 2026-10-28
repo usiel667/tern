@@ -76,6 +76,7 @@ impl MailBackend for Fake {
         ])
     }
     async fn sync_mailbox(&self, mailbox: &str, since: Option<&SyncState>, _: Option<u32>) -> Result<MailboxDelta> {
+        self.log.lock().unwrap().push(format!("sync {mailbox}"));
         let all = self.boxes.lock().unwrap().get(mailbox).cloned().unwrap_or_default();
         let renumbered = std::mem::take(&mut *self.renumber_next.lock().unwrap());
         let (visible, state) = match *self.window.lock().unwrap() {
@@ -493,6 +494,21 @@ async fn removed_account_is_not_resurrected_by_a_pending_reconnect() {
     engine.handle(Command::RemoveAccount(id));
     run_for(&mut engine, Duration::from_secs(60)).await;
     assert!(!engine.accounts.contains_key(&id));
+}
+
+#[tokio::test]
+async fn push_during_a_sync_syncs_again_after_it() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    fake.log.lock().unwrap().clear();
+    engine.handle(Command::SyncMailbox(inbox(&engine, id)));
+    engine.internal(Internal::Push(id, PushEvent::MailboxChanged { remote_id: "INBOX".into() }));
+    engine.settle().await;
+    assert_eq!(count(&fake, "sync INBOX"), 2);
+    // A push with nothing in flight syncs once.
+    fake.log.lock().unwrap().clear();
+    engine.internal(Internal::Push(id, PushEvent::MailboxChanged { remote_id: "INBOX".into() }));
+    engine.settle().await;
+    assert_eq!(count(&fake, "sync INBOX"), 1);
 }
 
 fn errors(rx: &async_channel::Receiver<Event>) -> Vec<String> {

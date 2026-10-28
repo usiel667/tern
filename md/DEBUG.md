@@ -21,6 +21,40 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-27 — A sync round with nothing new took 9–17 s
+
+**Seen:** each mailbox cost STATUS, SELECT, UID FETCH of new mail, FETCH CHANGEDSINCE
+and UID SEARCH, one after another on one connection, even when nothing had changed. On
+the test account: 9 mailboxes, 300–590 ms each, 3.7 s a round. Gmail has CONDSTORE but
+not QRESYNC, so the existing "nothing changed" shortcut (QRESYNC only) never applied.
+
+**Found on Gmail (probed on the test account):**
+- HIGHESTMODSEQ is account-wide: appending to INBOX raised it in every mailbox. It can't
+  tell you one mailbox is unchanged, only that the whole account is.
+- STATUS lags about 10 s behind changes made on *other* connections (measured 9.9 s and
+  10.3 s), whether or not the mailbox is selected. Changes made on the same connection
+  show at once. My first version trusted STATUS and the live test caught a missed flag
+  change.
+
+**Fixed:** the cursor (`ImapState` v3) also records UIDNEXT and the message count.
+- If STATUS shows the same UIDVALIDITY, HIGHESTMODSEQ, UIDNEXT and count, the sync stops
+  there (`unchanged_since`): 1 command instead of 5. The cursor doesn't move, so a change
+  STATUS hasn't caught up with arrives in a later sync (`stale_status_only_delays_a_change`).
+  A mailbox IDLE reported (`pushed`) skips this check, so pushed new mail isn't delayed.
+- Otherwise, the same UIDNEXT skips the new-mail fetch, and the same count as well skips
+  the deletion search (CONDSTORE mode): 3 commands instead of 5.
+- A quiet round on the test account: 3.7 s → 0.9 s (~100 ms a mailbox).
+- Your real Gmail (18 mailboxes): 9–17 s → 2.7–3.8 s a round (the log line includes
+  bodies downloaded ahead alongside it).
+
+- A push that arrived while its mailbox was already syncing used to be dropped (the sync in
+  flight may have looked before the change); it now queues one more sync after it
+  (`push_during_a_sync_syncs_again_after_it`).
+- The log says how long each round took ("sync round finished").
+
+Not changed: the unread counts come from STATUS too, so they can be ~10 s behind changes
+from other devices (as before).
+
 ## 2026-10-26 — Inbox messages took ~2 s to open after bodies were downloaded ahead
 
 **Seen:** after the download-ahead (below) filled in every Inbox body, opening an Inbox message

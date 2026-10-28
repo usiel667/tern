@@ -332,6 +332,8 @@ pub struct Engine {
     /// Mailboxes with a sync task in flight, so "Get Mail" spam doesn't stack.
     syncing: std::collections::HashSet<MailboxId>,
     in_flight: HashMap<AccountId, usize>,
+    /// When each account's current sync round started, for the log.
+    round_started: HashMap<AccountId, std::time::Instant>,
     /// Outbox rows with a send in flight, so a flush doesn't send them twice.
     sending: std::collections::HashSet<i64>,
     /// Messages waiting out their Undo Send hold, by hold key.
@@ -348,7 +350,8 @@ pub struct Engine {
     loading_older: std::collections::HashSet<MailboxId>,
     /// "Load older" asked for while the mailbox was syncing; runs after it.
     older_wanted: std::collections::HashSet<MailboxId>,
-    /// A sync asked for while the mailbox was loading older mail; runs after it.
+    /// A sync asked for while the mailbox was loading older mail, or pushed while it was
+    /// syncing; runs after it.
     sync_wanted: std::collections::HashSet<MailboxId>,
     /// The server had nothing older (this session).
     exhausted: std::collections::HashSet<MailboxId>,
@@ -393,6 +396,7 @@ impl Engine {
             rx,
             syncing: Default::default(),
             in_flight: Default::default(),
+            round_started: Default::default(),
             sending: Default::default(),
             held: Default::default(),
             send_limits: Default::default(),
@@ -578,6 +582,7 @@ impl Engine {
 
     fn sync_all(&mut self) {
         for id in self.accounts.keys().copied().collect::<Vec<_>>() {
+            self.round_started.entry(id).or_insert_with(std::time::Instant::now);
             self.refresh_mailboxes(id);
         }
     }
@@ -1254,6 +1259,7 @@ impl Engine {
         self.accounts.remove(&id);
         self.prefetching.remove(&id);
         self.auth_retry.remove(&id);
+        self.round_started.remove(&id);
         self.send_limits.remove(&id);
         self.draining.remove(&id);
         if let Err(e) = self.store.pending_clear(id) {
@@ -1280,6 +1286,10 @@ impl Engine {
                 let n = self.in_flight.entry(account).or_default();
                 *n = n.saturating_sub(1);
                 if *n == 0 {
+                    if let Some(t) = self.round_started.remove(&account) {
+                        // Includes whatever ran alongside it, such as downloading bodies ahead.
+                        info!(%account, took = ?t.elapsed(), "sync round finished");
+                    }
                     self.emit(Event::SyncFinished(account));
                 }
             }
@@ -1323,6 +1333,8 @@ impl Engine {
                 }
                 if self.older_wanted.remove(&mailbox) {
                     self.load_older(mailbox);
+                } else if self.sync_wanted.remove(&mailbox) {
+                    self.sync_mailbox(mailbox);
                 }
                 self.emit(Event::MessagesChanged(Some(mailbox)));
                 self.emit(Event::MailboxesChanged);
@@ -1421,6 +1433,10 @@ impl Engine {
                     .into_iter()
                     .find(|m| m.remote.remote_id == remote_id);
                 match target {
+                    // The sync in flight may have looked before this change.
+                    Some(m) if self.syncing.contains(&m.id) => {
+                        self.sync_wanted.insert(m.id);
+                    }
                     Some(m) => self.sync_mailbox(m.id),
                     None => self.refresh_mailboxes(account),
                 }
