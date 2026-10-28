@@ -245,15 +245,24 @@ fn strip_comments(text: &str) -> std::borrow::Cow<'_, str> {
     out.into()
 }
 
-/// A raw link, bare or in brackets. Previews leave them out (tracking links fill both lines).
-fn is_link(word: &str) -> bool {
-    let w = word.trim_start_matches(['<', '(', '[', '"']).to_ascii_lowercase();
-    w.starts_with("http://") || w.starts_with("https://") || w.starts_with("www.")
+/// `word` without a raw link: bare, in brackets, or glued on as plain-text mail writes them
+/// (`YouTube<https://c.gle/…>` keeps `YouTube`). Previews leave links out: tracking links
+/// filled both lines.
+fn without_link(word: &str) -> &str {
+    let lower = word.to_ascii_lowercase();
+    let bare = lower.trim_start_matches(['<', '(', '[', '"']);
+    if bare.starts_with("www.") {
+        return "";
+    }
+    match lower.find("http://").into_iter().chain(lower.find("https://")).min() {
+        Some(at) => word[..at].trim_end_matches(['<', '(', '[', '"', ':', '=']),
+        None => word,
+    }
 }
 
 /// A stored preview with HTML comments and raw links taken out (they used to be kept).
 pub fn tidy_preview(preview: &str) -> String {
-    strip_comments(preview).split_whitespace().filter(|w| !is_link(w)).collect::<Vec<_>>().join(" ")
+    strip_comments(preview).split_whitespace().map(without_link).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
 fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
@@ -267,7 +276,7 @@ fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
         if l.starts_with('>') || (l.starts_with("On ") && l.ends_with("wrote:")) {
             continue;
         }
-        let words = l.split_whitespace().filter(|w| !is_link(w));
+        let words = l.split_whitespace().map(without_link).filter(|w| !w.is_empty());
         for c in words.flat_map(|w| w.chars().chain(std::iter::once(' '))).filter(|&c| !invisible(c)) {
             let space = c.is_whitespace();
             if space && last_space {
@@ -395,6 +404,9 @@ Content-Type: text/plain; charset=utf-8\r\n\r\n";
         assert_eq!(tidy_preview("plain text stays"), "plain text stays");
         assert_eq!(tidy_preview("Visit HTTPS://Example.com now"), "Visit now");
         assert_eq!(tidy_preview("open <!--[if"), "open");
+        assert_eq!(tidy_preview("Watch on YouTube<https://c.gle/AAu> or Help<<https://x.example/h>> now"), "Watch on YouTube or Help now");
+        assert_eq!(tidy_preview("(see:https://x.example) href=\"https://x.example\" ok"), "(see href ok");
+        assert_eq!(tidy_preview("Tidy twice https://x.example"), tidy_preview(&tidy_preview("Tidy twice https://x.example")));
     }
 
     #[test]

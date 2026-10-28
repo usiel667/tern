@@ -34,6 +34,12 @@ so real words fill the preview. Schema v8 tidies stored previews in place with t
 mail loaded by scrolling. Stored previews were already cut at 200 characters, so a tidied one
 can be shorter than a newly fetched one.
 
+**First version missed most of them:** after v8, 127 previews still had links. Counting the
+shape of what came before each one (not the text): all were glued to a word, as Gmail's
+plain-text parts write them (`YouTube<https://…>`). A word now keeps the text before a link
+(`without_link`), and v9 runs the tidy again. On the real account: comments 31 → 0, previews
+with links 912 → 0; 14 previews that were nothing but links are now empty.
+
 ## 2026-10-27 — Deleting a message scrolled the list to the top
 
 **Seen (demo, nested test display):** select a message 15 rows down, press Delete: the next

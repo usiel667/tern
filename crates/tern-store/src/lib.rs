@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub struct Store {
     conn: Connection,
@@ -932,7 +932,8 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         // every mailbox's list again. Rows are updated in place, so bodies stay.
         conn.execute("UPDATE mailboxes SET sync_state = NULL", []).map_err(db)?;
     }
-    if from < 8 {
+    // v8 left links glued to a word (`Text<https://…>`); v9 runs the improved rules again.
+    if from < 9 {
         tidy_previews(conn)?;
     }
     Ok(())

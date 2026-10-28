@@ -361,13 +361,13 @@ fn migration_to_v3_learns_cached_mail() {
 }
 
 #[test]
-fn migration_to_v8_tidies_stored_previews() {
+fn migration_to_v9_tidies_stored_previews() {
     let (mut s, _, inbox, _) = setup();
     let me = Address::new(None, "tom@example.com");
     add(&mut s, inbox, vec![mail("1", me.clone(), vec![me.clone()], 1), mail("2", me.clone(), vec![me], 2)]);
     s.conn
         .execute_batch(
-            "UPDATE messages SET preview = 'Sale <!--[if !mso]><!--> ends https://t.example/x?y=1 tonight' WHERE remote_id = '1';
+            "UPDATE messages SET preview = 'Sale <!--[if !mso]><!--> ends https://t.example/x?y=1 tonight Shop<https://t.example/s>' WHERE remote_id = '1';
              UPDATE messages SET preview = 'Nothing to tidy' WHERE remote_id = '2';
              PRAGMA user_version = 7;",
         )
@@ -376,7 +376,7 @@ fn migration_to_v8_tidies_stored_previews() {
     let preview = |rid: &str| -> String {
         s.conn.query_row("SELECT preview FROM messages WHERE remote_id = ?1", [rid], |r| r.get(0)).unwrap()
     };
-    assert_eq!(preview("1"), "Sale ends tonight");
+    assert_eq!(preview("1"), "Sale ends tonight Shop");
     assert_eq!(preview("2"), "Nothing to tidy");
     // The search index follows.
     let hits = s.search(&tern_core::search::SearchQuery::parse("tonight"), &ListScope::Everything, 10).unwrap();
