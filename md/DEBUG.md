@@ -21,6 +21,36 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-27 — Scrolling a message jittered (NVIDIA, 4K at 120 Hz)
+
+**Seen (owner, mouse wheel, every message):** scrolling the message view was jittery and
+slower than other apps. Setup: RTX 4070 Ti, NVIDIA 615 driver, WebKitGTK 2.54.1, GTK 4.24,
+Tern on a 3840×2160 120 Hz monitor at scale 1.5.
+
+**Measured, not guessed:** wf-recorder videos of the monitor, counting frames that differ
+from the previous one (ffmpeg `mpdecimate`; nobody looked at the content):
+
+| Setup (same monitor, wheel scrolling) | changed frames/s | whole screen | owner's feel |
+|---|---|---|---|
+| Zen browser | 95–107 | ~118 | — |
+| Tern, defaults (GTK Vulkan) | ~45 (22–70) | drops to 72–91 | jittery |
+| Tern on the 60 Hz monitor | 48–60 | 60 | fine |
+| `GSK_RENDERER=ngl` | ~63, steady 70–89 | 92–105 | way better |
+| `WEBKIT_DISABLE_DMABUF_RENDERER=1` | ~36 (11–55) | drops to 50–77 | horrible |
+| ngl + smooth scrolling off | ~46 (notches jump) | ~80 (background load) | good, almost too fast |
+
+**Cause:** not a 60 fps cap, but slow drawing. Handing WebKit's frames to GTK's Vulkan
+renderer on NVIDIA couldn't keep up at that size, and it slowed the compositor down too.
+
+**Fixed:** on the NVIDIA driver (`/proc/driver/nvidia/version`), Tern sets `GSK_RENDERER=ngl`
+before GTK starts, unless the user set a renderer. Smooth scrolling stays on (owner's
+choice); a Preferences toggle is planned (md/PLAN.md).
+
+**Wrong turn:** a 0.35–0.5 s delay before scrolling started went away in later tests. I first
+said Tern's main thread wasn't to blame, but I'd looked at the wrong minute: right after
+each restart Tern reloads the list ~4 times a second (~46 ms each) while iCloud bodies
+download, which fits the delay. Not fixed yet; worth trimming (coalesce reloads).
+
 ## 2026-10-27 — Previews showed `<!--[if !mso]><!-->` and raw tracking links
 
 **Seen (real Gmail, counts only):** of 4,622 stored previews, 31 held HTML comments (Outlook's

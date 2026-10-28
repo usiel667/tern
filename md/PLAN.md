@@ -132,6 +132,7 @@ Key decisions:
 |---|---|---|
 | Preferences window | ⬜ | accounts list, signatures, fetch interval, remote content default, notification scope |
 | Remove account | 🟡 | engine supports it; no UI |
+| Smooth scrolling on/off | ⬜ | owner request 2026-10-27: Preferences toggle for the message view (WebKit `enable-smooth-scrolling`); default on. On NVIDIA Tern uses GTK's OpenGL renderer, which made scrolling smooth (see md/DEBUG.md 2026-10-27) |
 | Vim key bindings (optional) | ⬜ | owner request 2026-10-21: toggle in Preferences; move around the whole app (j/k messages, h/l between panes, gg/G, / search, …) without breaking typing in text fields |
 | Themes | ⬜ | owner request 2026-10-21: Preferences picker — System/Light/Dark plus Tokyo Night (Night, Storm, Moon, Day), Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn); likely also Gruvbox, Nord, Dracula, Everforest, Kanagawa. Palettes are MIT-licensed (fine under GPL, keep attribution). Must also tint the message viewer and compose, not just the chrome |
 

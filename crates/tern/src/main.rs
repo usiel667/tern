@@ -49,7 +49,20 @@ fn parse_args() -> (Args, Vec<String>) {
     (args, gtk_args)
 }
 
+/// On NVIDIA's driver, GTK's default Vulkan renderer draws the message view slowly enough
+/// to make scrolling jitter (measured at 4K/120 Hz: ~45 changed frames a second, vs ~63
+/// with OpenGL). Use OpenGL there unless the user picked a renderer.
+fn prefer_gl_on_nvidia() -> bool {
+    if std::env::var_os("GSK_RENDERER").is_some() || !std::path::Path::new("/proc/driver/nvidia/version").exists() {
+        return false;
+    }
+    // SAFETY: first thing in `main`, before any other thread exists.
+    unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+    true
+}
+
 fn main() -> gtk::glib::ExitCode {
+    let gl = prefer_gl_on_nvidia();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -57,6 +70,9 @@ fn main() -> gtk::glib::ExitCode {
         )
         .init();
 
+    if gl {
+        tracing::info!("NVIDIA driver: using GTK's OpenGL renderer (set GSK_RENDERER to override)");
+    }
     let (args, gtk_args) = parse_args();
     let app = adw::Application::builder()
         .application_id(if args.demo { "dev.tern.Tern.Demo" } else { APP_ID })
