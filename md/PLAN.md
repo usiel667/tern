@@ -196,6 +196,10 @@ Key decisions:
 
 - First launch syncs every mailbox's newest 1000 messages (older mail loads as you scroll);
   unread/total badges still show the server's full counts.
+- Scrolling a message on NVIDIA at 4K/120 Hz reaches ~70–89 changed frames a second (Zen ~100) after
+  the OpenGL fix. **Tune before release:** measure `WEBKIT_FORCE_VBLANK_TIMER`,
+  `WEBKIT_SKIA_GPU_PAINTING_THREADS` and `WEBKIT_USE_SKIA_FOR_COMPOSITION` with
+  `dev/frame-rate.sh` (details in md/DEBUG.md 2026-10-27); make the winner the NVIDIA default.
 - A sync round on a big Gmail account takes ~3 s (18 mailboxes, one connection; was 9–17 s). Gmail's change counter is account-wide, so any change anywhere makes every mailbox check its flags; syncing mailboxes in parallel would cut it further.
 - Messages over 5 MB aren't downloaded ahead and download whole (attachments too) when opened; fetching only the text parts (BODYSTRUCTURE) would make them instant.
 - The Flagged badge counts only downloaded mail (IMAP has no cheap server-wide flagged count).

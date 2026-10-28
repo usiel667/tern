@@ -46,6 +46,15 @@ renderer on NVIDIA couldn't keep up at that size, and it slowed the compositor d
 before GTK starts, unless the user set a renderer. Smooth scrolling stays on (owner's
 choice); a Preferences toggle is planned (md/PLAN.md).
 
+**Still short of Zen (~70–89 vs ~100):** Zen draws into its own window in one process;
+WebKit paints in a separate (sandboxed) process and hands each frame to GTK, then the
+compositor, and at 120 Hz there are only 8.3 ms per frame. Painting is already on the GPU
+(WebKit's Skia CPU mode is opt-in via `WEBKIT_SKIA_ENABLE_CPU_RENDERING`). Untested switches
+found in WebKit 2.54 that target that hand-off, saved for tuning before release (md/PLAN.md):
+`WEBKIT_FORCE_VBLANK_TIMER` (WebKit's own frame timer instead of the monitor's vblank, which
+NVIDIA may report unevenly; most promising), `WEBKIT_SKIA_GPU_PAINTING_THREADS=N`,
+`WEBKIT_USE_SKIA_FOR_COMPOSITION`. Measure each with `dev/frame-rate.sh DP-3 <label>`.
+
 **Wrong turn:** a 0.35–0.5 s delay before scrolling started went away in later tests. I first
 said Tern's main thread wasn't to blame, but I'd looked at the wrong minute: right after
 each restart Tern reloads the list ~4 times a second (~46 ms each) while iCloud bodies
