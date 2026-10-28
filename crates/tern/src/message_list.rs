@@ -363,6 +363,9 @@ pub fn select_after_removal(ui: &Rc<Ui>) {
     match next {
         Some(i) => {
             ui.list.selection.select_item(i, true);
+            // Focus too: the list keeps its scroll position anchored to the focused row,
+            // and removing that row sends it back to the top.
+            ui.list.view.scroll_to(i, gtk::ListScrollFlags::FOCUS, None);
         }
         None => {
             ui.list.selection.unselect_all();

@@ -21,6 +21,19 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-27 — Deleting a message scrolled the list to the top
+
+**Seen (demo, nested test display):** select a message 15 rows down, press Delete: the next
+message is selected but the list shows the top. Restoring the scroll value in an idle
+(tried 10-25) didn't help.
+
+**Cause:** `select_after_removal` moved the *selection* to the next row but left keyboard
+*focus* on the row being deleted. GTK's ListView anchors its scroll position to the focused
+row; when that row is removed, the anchor falls back to the top.
+
+**Fixed:** it also moves focus there (`scroll_to(…, FOCUS)`, as j/k already do). Same test:
+the list stays where it was and the next message takes the deleted one's place.
+
 ## 2026-10-27 — A sync round with nothing new took 9–17 s
 
 **Seen:** each mailbox cost STATUS, SELECT, UID FETCH of new mail, FETCH CHANGEDSINCE
@@ -77,8 +90,8 @@ swapped all 500 rows into the model, so GTK rebuilt the list, and replacing the 
 resets the ListView's scroll. Reload now updates rows in place when the same messages are in
 the same order (replace the boxed value, redraw the visible row widget), and otherwise splices
 only the changed stretch; restoring the selection no longer re-renders the viewer. Opens are
-now under 0.3 s and reloads under 30 ms. **Still open:** deleting a message scrolls the list
-to the top (it did before too); restoring the adjustment value in an idle didn't help.
+now under 0.3 s and reloads under 30 ms. Deleting a message also scrolled the list to the
+top (fixed 2026-10-27, below).
 
 ## 2026-10-25 — Opening a message still took ~0.5 s (and some downloaded twice)
 
