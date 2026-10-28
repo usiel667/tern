@@ -36,6 +36,9 @@ impl Sidebar {
         header.set_title_widget(Some(&adw::WindowTitle::new("Mailboxes", "")));
         let menu = gtk::gio::Menu::new();
         menu.append(Some("Add Account…"), Some("win.add-account"));
+        let sign_in = gtk::gio::MenuItem::new(Some("Sign In Again…"), None);
+        sign_in.set_action_and_target_value(Some("win.sign-in"), Some(&"".to_variant()));
+        menu.append_item(&sign_in);
         menu.append(Some("Unsent Messages…"), Some("win.unsent"));
         let view = gtk::gio::Menu::new();
         view.append(Some("Organize by Conversation"), Some("win.conversations"));

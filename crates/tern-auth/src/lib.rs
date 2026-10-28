@@ -87,11 +87,7 @@ fn load_secret(account: AccountId) -> Result<String> {
 pub async fn credential_for(cfg: &AccountConfig) -> Result<Credential> {
     let secret = load_secret(cfg.id)?;
     Ok(match cfg.auth {
-        AuthMethod::Password => Credential::Password {
-            username: cfg.username.clone(),
-            password: secret,
-        },
-        AuthMethod::BearerToken => Credential::Bearer { token: secret },
+        AuthMethod::Password | AuthMethod::BearerToken => credential_from_secret(cfg, &secret),
         AuthMethod::OAuth2Google => {
             let mut tokens: OAuthTokens =
                 serde_json::from_str(&secret).map_err(|e| Error::Auth(e.to_string()))?;
@@ -107,6 +103,17 @@ pub async fn credential_for(cfg: &AccountConfig) -> Result<Credential> {
     })
 }
 
+/// The credential for a password or token account, cleaned the way the sign-in form cleans
+/// what you type: a secret saved outside Tern (e.g. with `secret-tool`) can carry a newline,
+/// which IMAP refuses to send.
+pub fn credential_from_secret(cfg: &AccountConfig, secret: &str) -> Credential {
+    let secret = cfg.clean_secret(secret);
+    match cfg.auth {
+        AuthMethod::BearerToken => Credential::Bearer { token: secret },
+        _ => Credential::Password { username: cfg.username.clone(), password: secret },
+    }
+}
+
 /// The SASL XOAUTH2 initial response (before base64), shared by IMAP and SMTP.
 pub fn xoauth2_payload(user: &str, access_token: &str) -> String {
     format!("user={user}\x01auth=Bearer {access_token}\x01\x01")
@@ -120,6 +127,23 @@ mod tests {
     fn debug_hides_secrets() {
         let c = Credential::Password { username: "u".into(), password: "hunter2".into() };
         assert!(!format!("{c:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn saved_secrets_are_cleaned() {
+        use tern_core::account::Provider;
+        let password = |c: Credential| match c {
+            Credential::Password { password, .. } => password,
+            other => panic!("{other:?}"),
+        };
+        // A Gmail app password pasted with its spaces and a trailing newline.
+        let mut gmail = AccountConfig::preset(Provider::Gmail, "T", "t@gmail.com");
+        gmail.auth = AuthMethod::Password;
+        assert_eq!(password(credential_from_secret(&gmail, "abcd efgh ijkl mnop\n")), "abcdefghijklmnop");
+        let other = AccountConfig::preset(Provider::Generic, "T", "t@example.com");
+        assert_eq!(password(credential_from_secret(&other, "pa ss\r\n")), "pa ss");
+        let fastmail = AccountConfig::preset(Provider::Fastmail, "T", "t@fastmail.com");
+        assert!(matches!(credential_from_secret(&fastmail, "tok\n"), Credential::Bearer { token } if token == "tok"));
     }
 
     #[test]

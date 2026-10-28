@@ -178,6 +178,9 @@ pub enum Command {
     DiscardSend(i64),
     /// Persist a new account and start syncing it. Secrets must already be in the keyring.
     AddAccount(Box<AccountConfig>),
+    /// New credentials for an account are in the keyring: connect now instead of waiting out
+    /// the retry back-off. Also loads an account that couldn't sign in at startup.
+    SignIn(Box<AccountConfig>),
     RemoveAccount(AccountId),
     Shutdown,
 }
@@ -207,6 +210,9 @@ pub enum Event {
     /// The held message with this key is on its way; it can no longer be taken back.
     SendReleased(String),
     Error { account: Option<AccountId>, message: String },
+    /// Signing in to an account failed (wrong or missing password, expired token); the UI
+    /// offers to sign in again (`Command::SignIn`).
+    SignInFailed { account: AccountId, message: String },
 }
 
 enum Internal {
@@ -369,7 +375,7 @@ impl Engine {
         for cfg in file.accounts.into_iter().filter(|a| a.enabled) {
             match backend_for(&cfg).await {
                 Ok(b) => engine.add(cfg, b),
-                Err(e) => engine.emit(Event::Error { account: Some(cfg.id), message: e.to_string() }),
+                Err(e) => engine.fail_with(Some(cfg.id), e),
             }
         }
         Ok(engine)
@@ -676,6 +682,7 @@ impl Engine {
                 self.emit(Event::OutboxChanged);
             }
             Command::AddAccount(cfg) => self.add_account(*cfg),
+            Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),
             Command::Shutdown => {}
         }
@@ -684,6 +691,17 @@ impl Engine {
     fn fail(&self, account: Option<AccountId>, e: impl std::fmt::Display) {
         warn!(?account, "{e}");
         self.emit(Event::Error { account, message: e.to_string() });
+    }
+
+    /// Like `fail`, but a sign-in failure becomes `SignInFailed` so the UI can offer a fix.
+    fn fail_with(&self, account: Option<AccountId>, e: Error) {
+        match (account, &e) {
+            (Some(account), Error::Auth(_)) => {
+                warn!(%account, "{e}");
+                self.emit(Event::SignInFailed { account, message: e.to_string() });
+            }
+            _ => self.fail(account, e),
+        }
     }
 
     fn fetch_body(&mut self, id: MessageId) {
@@ -1222,6 +1240,16 @@ impl Engine {
         true
     }
 
+    fn sign_in(&mut self, cfg: AccountConfig) {
+        let Some(loaded) = self.accounts.get(&cfg.id).map(|a| a.cfg.clone()) else {
+            // Never loaded (no credentials at startup): bring it up like a new account.
+            return self.rebuild_backend(cfg, Duration::ZERO, false);
+        };
+        // Start a fresh streak; a back-off rebuild still sleeping just reconnects once more.
+        self.auth_retry.insert(cfg.id, AuthRetry { pending: true, failures: 0 });
+        self.rebuild_backend(loaded, Duration::ZERO, true);
+    }
+
     fn remove_account(&mut self, id: AccountId) {
         self.accounts.remove(&id);
         self.prefetching.remove(&id);
@@ -1339,7 +1367,7 @@ impl Engine {
                     Err(Error::Network(e)) => info!(%account, "loading older mail: {e}"),
                     Err(e @ Error::Auth(_)) => {
                         if self.schedule_reconnect(account) {
-                            self.fail(Some(account), e);
+                            self.fail_with(Some(account), e);
                         }
                     }
                     Err(e) => self.fail(Some(account), e),
@@ -1423,7 +1451,7 @@ impl Engine {
                     r.pending = false;
                 }
                 if self.schedule_reconnect(account) {
-                    self.fail(Some(account), error);
+                    self.fail_with(Some(account), error);
                 }
             }
             Internal::OpDone { account, id, op, result } => {
@@ -1522,7 +1550,7 @@ impl Engine {
                         return;
                     }
                 }
-                self.fail(account, error);
+                self.fail_with(account, error);
             }
         }
     }

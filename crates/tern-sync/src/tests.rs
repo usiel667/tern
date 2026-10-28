@@ -430,7 +430,7 @@ async fn wrong_password_backs_off_instead_of_looping() {
     run_for(&mut engine, Duration::from_secs(3600 - 35)).await;
     assert_eq!(count(&fake, "list"), 8);
     let toasts = std::iter::from_fn(|| rx.try_recv().ok())
-        .filter(|e| matches!(e, Event::Error { .. }))
+        .filter(|e| matches!(e, Event::SignInFailed { .. }))
         .count();
     assert_eq!(toasts, 8, "one error per attempt, not a flood");
 
@@ -439,6 +439,44 @@ async fn wrong_password_backs_off_instead_of_looping() {
     run_for(&mut engine, AUTH_RETRY_MAX).await;
     assert!(!engine.auth_retry.contains_key(&id));
     assert_eq!(count(&fake, "list"), 9);
+}
+
+#[tokio::test(start_paused = true)]
+async fn signing_in_again_skips_the_back_off() {
+    let (mut engine, fake, _rx, id) = setup().await;
+    let f = fake.clone();
+    engine.connect = Arc::new(move |_| {
+        let b: Arc<dyn MailBackend> = f.clone();
+        Box::pin(async move { Ok(b) })
+    });
+    *fake.bad_password.lock().unwrap() = true;
+    engine.handle(Command::SyncAll);
+    run_for(&mut engine, Duration::from_secs(60)).await; // two failures in, now waiting 60s
+    let before = count(&fake, "list");
+
+    *fake.bad_password.lock().unwrap() = false;
+    let cfg = engine.accounts[&id].cfg.clone();
+    engine.handle(Command::SignIn(Box::new(cfg)));
+    run_for(&mut engine, Duration::from_secs(5)).await;
+    assert_eq!(count(&fake, "list"), before + 1, "connected right away");
+    assert!(!engine.auth_retry.get(&id).is_some_and(|r| r.failures > 0));
+}
+
+#[tokio::test(start_paused = true)]
+async fn signing_in_loads_an_account_that_failed_at_startup() {
+    let (mut engine, fake, _rx, _) = setup().await;
+    let f = fake.clone();
+    engine.connect = Arc::new(move |_| {
+        let b: Arc<dyn MailBackend> = f.clone();
+        Box::pin(async move { Ok(b) })
+    });
+    // Configured, but never loaded: its password was missing when Tern started.
+    let cfg = AccountConfig::preset(Provider::Fastmail, "Ann", "ann@x.com");
+    let id = cfg.id;
+    engine.handle(Command::SignIn(Box::new(cfg)));
+    run_for(&mut engine, Duration::from_secs(5)).await;
+    assert!(engine.accounts.contains_key(&id));
+    assert!(engine.store().mailbox_by_role(id, MailboxRole::Inbox).unwrap().is_some());
 }
 
 #[tokio::test(start_paused = true)]

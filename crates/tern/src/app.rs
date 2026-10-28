@@ -50,6 +50,8 @@ pub struct Ui {
     pub send_limits: RefCell<std::collections::HashMap<AccountId, u64>>,
     /// The Unsent Messages dialog and its list, while open.
     pub unsent: RefCell<Option<(adw::Dialog, gtk::ListBox)>>,
+    /// The "couldn't sign in" toast while it's up, so retries don't stack more.
+    signin_toast: Rc<RefCell<Option<adw::Toast>>>,
     reload_pending: Cell<bool>,
     sidebar_pending: Cell<bool>,
     busy: Cell<u32>,
@@ -163,6 +165,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         demo,
         send_limits: Default::default(),
         unsent: RefCell::new(None),
+        signin_toast: Default::default(),
         reload_pending: Cell::new(false),
         sidebar_pending: Cell::new(false),
         busy: Cell::new(0),
@@ -237,6 +240,33 @@ impl Ui {
             .timeout(10)
             .build();
         self.toasts.add_toast(t);
+    }
+
+    /// A sign-in failure stays up until dismissed, with a button that fixes it.
+    fn toast_sign_in(&self, account: AccountId, msg: &str) {
+        if let Some(t) = self.signin_toast.borrow().as_ref() {
+            t.set_title(&glib::markup_escape_text(msg));
+            return;
+        }
+        let t = adw::Toast::builder()
+            .title(glib::markup_escape_text(msg))
+            .button_label("Sign In…")
+            .action_name("win.sign-in")
+            .action_target(&account.to_string().to_variant())
+            .timeout(0)
+            .build();
+        let slot = self.signin_toast.clone();
+        t.connect_dismissed(move |_| *slot.borrow_mut() = None);
+        *self.signin_toast.borrow_mut() = Some(t.clone());
+        self.toasts.add_toast(t);
+    }
+
+    /// New credentials work: take down the sign-in toast.
+    pub fn signed_in(&self) {
+        let toast = self.signin_toast.borrow_mut().take();
+        if let Some(t) = toast {
+            t.dismiss();
+        }
     }
 
     pub fn is_dark(&self) -> bool {
@@ -397,6 +427,10 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
                 .unwrap_or_default();
             ui.toast(&format!("{prefix}{message}"));
         }
+        Event::SignInFailed { account, message } => {
+            let name = ui.account_for(account).map(|a| a.identity.email).unwrap_or_default();
+            ui.toast_sign_in(account, &format!("Couldn’t sign in to {name}: {message}"));
+        }
     }
 }
 
@@ -464,6 +498,17 @@ fn install_actions(ui: &Rc<Ui>) {
         });
     }
     win.add_action(&conv);
+
+    // Sign in again: win.sign-in(account id), or "" to choose the account.
+    let sign_in = gio::SimpleAction::new("sign-in", Some(glib::VariantTy::STRING));
+    {
+        let ui = ui.clone();
+        sign_in.connect_activate(move |_, p| {
+            let id = p.and_then(|v| v.get::<String>()).unwrap_or_default();
+            accounts::sign_in_again(&ui, &id);
+        });
+    }
+    win.add_action(&sign_in);
 
     // Notification click: app.show-message(id)
     let show = gio::SimpleAction::new("show-message", Some(glib::VariantTy::INT64));
