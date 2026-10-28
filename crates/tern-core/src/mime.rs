@@ -226,8 +226,39 @@ fn invisible(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '\u{00AD}' | '\u{034F}')
 }
 
+/// `text` without HTML comments. Some senders leak Outlook's `<!--[if !mso]><!-->` into
+/// their plain-text part. A comment left open (the text was cut) drops the rest.
+fn strip_comments(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("<!--") {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start + 4..].find("-->") {
+            Some(end) => rest = &rest[start + 4 + end + 3..],
+            None => return out.into(),
+        }
+    }
+    out.push_str(rest);
+    out.into()
+}
+
+/// A raw link, bare or in brackets. Previews leave them out (tracking links fill both lines).
+fn is_link(word: &str) -> bool {
+    let w = word.trim_start_matches(['<', '(', '[', '"']).to_ascii_lowercase();
+    w.starts_with("http://") || w.starts_with("https://") || w.starts_with("www.")
+}
+
+/// A stored preview with HTML comments and raw links taken out (they used to be kept).
+pub fn tidy_preview(preview: &str) -> String {
+    strip_comments(preview).split_whitespace().filter(|w| !is_link(w)).collect::<Vec<_>>().join(" ")
+}
+
 fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
     let text = msg.body_text(0)?;
+    let text = strip_comments(&text);
     let mut out = String::with_capacity(PREVIEW_CHARS);
     let mut last_space = true;
     for line in text.lines() {
@@ -236,7 +267,8 @@ fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
         if l.starts_with('>') || (l.starts_with("On ") && l.ends_with("wrote:")) {
             continue;
         }
-        for c in l.chars().filter(|&c| !invisible(c)).chain(std::iter::once(' ')) {
+        let words = l.split_whitespace().filter(|w| !is_link(w));
+        for c in words.flat_map(|w| w.chars().chain(std::iter::once(' '))).filter(|&c| !invisible(c)) {
             let space = c.is_whitespace();
             if space && last_space {
                 continue;
@@ -347,6 +379,22 @@ Content-Type: text/plain; charset=utf-8\r\n\r\n";
             }
         }
         out.as_bytes().chunks(76).map(|l| std::str::from_utf8(l).unwrap()).collect::<Vec<_>>().join("\r\n")
+    }
+
+    #[test]
+    fn previews_leave_out_html_comments_and_links() {
+        let body = b"Hi Tom,<!--[if !mso]><!--> see the plan<!--<![endif]--> at https://c.gle/AAuDWx9 \
+(https://example.com/a) or <http://t.co/x> and www.example.com, today.\r\n<!--[if mso]> cut off";
+        let e = envelope_from_parts("1".into(), HEADER, Some(body), Flags::default(), 0, None);
+        assert_eq!(e.preview.as_deref(), Some("Hi Tom, see the plan at or and today."));
+    }
+
+    #[test]
+    fn tidy_preview_cleans_what_older_versions_stored() {
+        assert_eq!(tidy_preview("News <!--[if !mso]><!--> today https://x.example/t?q=1 more"), "News today more");
+        assert_eq!(tidy_preview("plain text stays"), "plain text stays");
+        assert_eq!(tidy_preview("Visit HTTPS://Example.com now"), "Visit now");
+        assert_eq!(tidy_preview("open <!--[if"), "open");
     }
 
     #[test]

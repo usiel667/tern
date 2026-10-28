@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub struct Store {
     conn: Connection,
@@ -932,7 +932,40 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
         // every mailbox's list again. Rows are updated in place, so bodies stay.
         conn.execute("UPDATE mailboxes SET sync_state = NULL", []).map_err(db)?;
     }
+    if from < 8 {
+        tidy_previews(conn)?;
+    }
     Ok(())
+}
+
+/// Take HTML comments and raw links out of previews stored before they were left out.
+/// Done in place: fetching the lists again would drop older mail loaded by scrolling.
+fn tidy_previews(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN").map_err(db)?;
+    let result = (|| {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, preview FROM messages
+                     WHERE preview LIKE '%<!--%' OR preview LIKE '%http%' OR preview LIKE '%www.%'",
+                )
+                .map_err(db)?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(db)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(db)?
+        };
+        for (id, preview) in rows {
+            let tidy = tern_core::mime::tidy_preview(&preview);
+            if tidy != preview {
+                conn.execute("UPDATE messages SET preview = ?1 WHERE id = ?2", rusqlite::params![tidy, id])
+                    .map_err(db)?;
+            }
+        }
+        Ok(())
+    })();
+    conn.execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" }).map_err(db)?;
+    result
 }
 
 /// How many messages of a mailbox are cached, and how many of those are unread.

@@ -21,6 +21,19 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-10-27 — Previews showed `<!--[if !mso]><!-->` and raw tracking links
+
+**Seen (real Gmail, counts only):** of 4,622 stored previews, 31 held HTML comments (Outlook's
+conditional comments leaked into Google's plain-text parts) and 912 held raw links
+(`https://c.gle/…` and the like), which used up the two preview lines.
+
+**Fixed:** `preview_of` drops HTML comments (an unclosed one, cut off by the 2 KB prefix,
+drops the rest) and words that are links (`http(s)://`, `www.`, also inside `<>`, `()`, `[]`),
+so real words fill the preview. Schema v8 tidies stored previews in place with the same rules
+(`tidy_preview`) instead of fetching the lists again (v7's way), which would have dropped older
+mail loaded by scrolling. Stored previews were already cut at 200 characters, so a tidied one
+can be shorter than a newly fetched one.
+
 ## 2026-10-27 — Deleting a message scrolled the list to the top
 
 **Seen (demo, nested test display):** select a message 15 rows down, press Delete: the next

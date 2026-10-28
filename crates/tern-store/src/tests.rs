@@ -361,6 +361,30 @@ fn migration_to_v3_learns_cached_mail() {
 }
 
 #[test]
+fn migration_to_v8_tidies_stored_previews() {
+    let (mut s, _, inbox, _) = setup();
+    let me = Address::new(None, "tom@example.com");
+    add(&mut s, inbox, vec![mail("1", me.clone(), vec![me.clone()], 1), mail("2", me.clone(), vec![me], 2)]);
+    s.conn
+        .execute_batch(
+            "UPDATE messages SET preview = 'Sale <!--[if !mso]><!--> ends https://t.example/x?y=1 tonight' WHERE remote_id = '1';
+             UPDATE messages SET preview = 'Nothing to tidy' WHERE remote_id = '2';
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+    let s = Store::init(s.conn).unwrap();
+    let preview = |rid: &str| -> String {
+        s.conn.query_row("SELECT preview FROM messages WHERE remote_id = ?1", [rid], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(preview("1"), "Sale ends tonight");
+    assert_eq!(preview("2"), "Nothing to tidy");
+    // The search index follows.
+    let hits = s.search(&tern_core::search::SearchQuery::parse("tonight"), &ListScope::Everything, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(s.search(&tern_core::search::SearchQuery::parse("mso"), &ListScope::Everything, 10).unwrap().is_empty());
+}
+
+#[test]
 fn rejected_sends_leave_the_queue_but_are_kept() {
     let (mut s, acct, _, _) = setup();
     let a = s.outbox_push(acct, b"A", "tom@x.com", &["ann@x.com".into()]).unwrap();

@@ -70,7 +70,7 @@ Key decisions:
 | Organize by Conversation | ✅ | toggle in menu; count badge; replies only (Gmail-style same-subject grouping planned as a setting) |
 | Conversation view showing all messages | 🟡 | list of thread messages above the open one; Apple stacks full bodies |
 | Unread dot, colored flags (7 colors), replied/forwarded icons | ✅ | flags round-trip via `$MailFlagBit*` like Apple |
-| Two-line previews, Apple-style dates | ✅ | |
+| Two-line previews, Apple-style dates | ✅ | leave out HTML comments and raw links (schema v8 tidies stored ones) |
 | HTML mail, remote content blocking | ✅ | |
 | Inline (cid:) images | ✅ | |
 | Attachments: list, save | ✅ | |
@@ -172,6 +172,9 @@ Key decisions:
    - ✅ Gmail app passwords: Add Account → Google asks for an app password (spaces removed);
      browser sign-in is offered only when an OAuth client is configured; a refused password
      explains app passwords (OpenSpec change `gmail-app-passwords`).
+   - ✅ Sign In Again: a failed sign-in shows a toast with "Sign In…", and the Mailboxes ⋮
+     menu has "Sign In Again…"; the new password is checked before it's saved and the account
+     reconnects at once (no back-off wait), even one that failed at startup.
    - ✅ Save to Drafts / autosave: drafts are saved on this computer first, then uploaded to
      the account's Drafts mailbox replacing the previous copy (IMAP finds the new UID by
      Message-ID); sending or Don't Save removes them; drafts from other apps open for editing
