@@ -389,6 +389,20 @@ async fn flush_during_send_does_not_send_twice() {
 }
 
 #[test]
+fn accounts_sort_into_the_dragged_order() {
+    let acct = |name: &str| {
+        let mut c = AccountConfig::preset(Provider::Fastmail, "Tom", &format!("{name}@x.com"));
+        c.description = name.into();
+        c
+    };
+    let mut accounts = vec![acct("gmail"), acct("icloud"), acct("work")];
+    let (gmail, icloud) = (accounts[0].id, accounts[1].id);
+    sort_accounts(&mut accounts, &[icloud, gmail]);
+    let names: Vec<&str> = accounts.iter().map(|a| a.description.as_str()).collect();
+    assert_eq!(names, ["icloud", "gmail", "work"], "unlisted accounts stay after the listed ones");
+}
+
+#[test]
 fn auth_retry_delay_backs_off_and_caps() {
     let secs: Vec<u64> = (1..=10).map(|n| auth_retry_delay(n).as_secs()).collect();
     assert_eq!(secs, [0, 30, 60, 120, 240, 480, 960, 1800, 1800, 1800]);

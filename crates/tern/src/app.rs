@@ -68,6 +68,20 @@ pub fn load_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+    // The dark look (Tokyo Night) has to beat GTK themes that hard-code widget colours at USER
+    // priority, so it sits just above them, and only while the app is dark.
+    let dark = gtk::CssProvider::new();
+    dark.load_from_resource("/dev/tern/Tern/tokyo-night.css");
+    let styles = adw::StyleManager::default();
+    let apply = move |sm: &adw::StyleManager| {
+        if sm.is_dark() {
+            gtk::style_context_add_provider_for_display(&display, &dark, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
+        } else {
+            gtk::style_context_remove_provider_for_display(&display, &dark);
+        }
+    };
+    apply(&styles);
+    styles.connect_dark_notify(apply);
 }
 
 /// Builds the main window; `None` when startup failed (an error dialog is shown instead).

@@ -128,3 +128,68 @@
   padding: 12px 16px;
   font-size: 1.05em;
 }
+
+/* Let the compositor blur what's behind a translucent window (e.g. HyDE's window opacity).
+   GTK 4.24 tells it which areas to blur (ext-background-effect) and, without this, asks for
+   none, which Hyprland obeys; see md/DEBUG.md 2026-10-27. */
+window.background {
+  backdrop-filter: blur(20px);
+}
+
+/* An account's name above its folders: twice the size of the other section titles,
+   centred in its bubble (the space above the section sits outside the bubble). */
+.account-section {
+  font-size: 1.6em;
+  margin: 4px 8px;
+}
+row.account-header {
+  margin-top: 10px;
+  border-radius: 8px;
+}
+/* The header can be dragged: its hover bubble is tinted, and so is the bubble that moves
+   and the header it would land on. */
+row.account-header:hover {
+  background-color: alpha(@accent_bg_color, 0.18);
+}
+row.account-header.drop-onto {
+  background-color: alpha(@accent_bg_color, 0.28);
+}
+/* Pressed or being dragged: a solid bubble with the name in white. */
+row.account-header.pressed,
+row.account-header.dragging {
+  background-color: @accent_bg_color;
+}
+row.account-header.pressed .account-section,
+row.account-header.dragging .account-section,
+row.account-header.pressed .section-toggle,
+row.account-header.dragging .section-toggle {
+  color: #ffffff;
+  opacity: 1;
+}
+
+/* Hide/show button on an account's header in the sidebar. */
+.section-toggle {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  opacity: 0.6;
+}
+.section-toggle,
+.section-toggle:hover,
+.section-toggle:active,
+.section-toggle:focus-visible {
+  background: none;
+  box-shadow: none;
+  outline: none;
+}
+.section-toggle:hover {
+  opacity: 1;
+}
+
+/* No outline on sidebar rows while something is dragged over them; the account's header
+   lights up instead (sidebar.rs). */
+.navigation-sidebar row:drop(active),
+.navigation-sidebar:drop(active) {
+  box-shadow: none;
+  outline: none;
+}

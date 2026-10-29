@@ -1,0 +1,76 @@
+/* Tern's dark look: Tokyo Night ("Night"), matching Obsidian's Tokyo Night theme.
+   Loaded above the user's GTK theme (USER + 1) and only while the app is dark; see app.rs.
+   Palette: bg #1a1b26, sidebar #16161e, highlight #292e42, text #c0caf5, text-dim #a9b1d6,
+   faint #565f89, purple #bb9af7, red #ff757f, amber #e0af68, accent #80d0ff. */
+
+:root {
+  --window-bg-color: #1a1b26; --window-fg-color: #c0caf5;
+  --view-bg-color: #1a1b26; --view-fg-color: #c0caf5;
+  --headerbar-bg-color: #1a1b26; --headerbar-fg-color: #c0caf5;
+  --sidebar-bg-color: #16161e; --sidebar-fg-color: #c0caf5;
+  --secondary-sidebar-bg-color: #1a1b26; --secondary-sidebar-fg-color: #c0caf5;
+  --popover-bg-color: #16161e; --popover-fg-color: #c0caf5;
+  --dialog-bg-color: #1a1b26; --dialog-fg-color: #c0caf5;
+  --card-bg-color: #292e42; --card-fg-color: #c0caf5;
+  --accent-bg-color: #80d0ff; --accent-fg-color: #1a1b26; --accent-color: #80d0ff;
+}
+
+/* Backgrounds: one window colour, a darker mailbox sidebar, everything else see-through. */
+window.background { background-color: #1a1b26; color: #c0caf5; }
+headerbar, toolbarview, .view, list, listview, scrolledwindow, viewport, statuspage,
+.navigation-sidebar, .top-bar, .bottom-bar {
+  background-color: transparent; background-image: none; box-shadow: none; color: #c0caf5;
+}
+overlay-split-view > .sidebar-pane { background-color: #16161e; }
+navigation-split-view > .sidebar-pane, navigation-split-view > .content-pane { background-color: #1a1b26; }
+overlay-split-view > .sidebar-pane, navigation-split-view > .sidebar-pane { border-right: 1px solid #292e42; }
+entry, searchentry, .search { background-color: #16161e; color: #c0caf5; }
+button { color: #a9b1d6; }
+.dim-label { color: #565f89; opacity: 1; }
+
+/* Rows: a rounded bubble for hover and selection, never a box or focus outline. */
+row, listview > row, .navigation-sidebar > row { border-radius: 8px; }
+row, row:focus, row:focus-visible, row:focus-within,
+listview > row, listview > row:focus, listview > row:focus-visible,
+listview:focus-visible > row:selected, .navigation-sidebar > row:focus-visible {
+  outline: none; outline-width: 0;
+}
+row:hover, listview > row:hover, .navigation-sidebar > row:hover {
+  background-color: alpha(#292e42, 0.6); outline: none; box-shadow: none; border: none;
+}
+row:selected, listview > row:selected, row:selected:hover, .navigation-sidebar > row:selected {
+  background-color: #292e42; color: #c0caf5; box-shadow: none; border: none;
+}
+
+/* Sidebar: purple selected mailbox, faint section titles and counts. */
+.mailbox-row image { color: #a9b1d6; }
+row:selected .mailbox-row image, row:selected .mailbox-row label { color: #bb9af7; }
+.sidebar-section, .badge { color: #565f89; }
+
+/* Account headers you can drag: purple, faint on hover, stronger on the account a drop would
+   land on, solid with a white name while pressed or dragged. No GTK drop outline. */
+row.account-header:hover { background-color: alpha(#bb9af7, 0.18); }
+row.account-header.drop-onto { background-color: alpha(#bb9af7, 0.28); }
+row.account-header.pressed, row.account-header.dragging { background-color: #bb9af7; }
+row.account-header.pressed .account-section, row.account-header.dragging .account-section,
+row.account-header.pressed .section-toggle, row.account-header.dragging .section-toggle {
+  color: #ffffff; opacity: 1;
+}
+.navigation-sidebar row:drop(active), .navigation-sidebar:drop(active) { box-shadow: none; outline: none; }
+
+/* Message list: purple senders, amber dates, faint previews, purple thread count.
+   The selected message gets a red sender and a purple subject. */
+.message-row .sender { color: #bb9af7; }
+.message-row .preview { color: #565f89; }
+.message-row .date { color: #e0af68; }
+.message-row .thread-count, row:selected .message-row .thread-count { color: #bb9af7; }
+.unread-dot { background: #80d0ff; }
+listview > row:selected .message-row .sender, row:selected .message-row .sender { color: #ff757f; }
+listview > row:selected .message-row .subject, row:selected .message-row .subject { color: #bb9af7; }
+
+/* Open message header: the sender is the big purple line, the subject smaller in body text. */
+.viewer-header { background-color: transparent; }
+.viewer-from { color: #bb9af7; font-size: 1.15em; font-weight: 700; }
+.viewer-header label.viewer-subject, label.viewer-subject {
+  color: #c0caf5; opacity: 1; font-size: 1em; font-weight: 600;
+}

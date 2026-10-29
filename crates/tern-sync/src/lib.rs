@@ -43,6 +43,11 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 pub const AUTH_RETRY_MIN: Duration = Duration::from_secs(30);
 pub const AUTH_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
 
+/// Put `accounts` in `order`; accounts not in it keep their relative order after the rest.
+fn sort_accounts(accounts: &mut [AccountConfig], order: &[AccountId]) {
+    accounts.sort_by_key(|a| order.iter().position(|id| *id == a.id).unwrap_or(usize::MAX));
+}
+
 /// Wait before reconnect attempt `n` (1-based) in a run of sign-in failures.
 /// The first is immediate (usually an expired token that a refresh fixes); after
 /// that it doubles from `AUTH_RETRY_MIN` up to `AUTH_RETRY_MAX`, so a wrong
@@ -182,6 +187,9 @@ pub enum Command {
     /// the retry back-off. Also loads an account that couldn't sign in at startup.
     SignIn(Box<AccountConfig>),
     RemoveAccount(AccountId),
+    /// The accounts' new sidebar order (saved to accounts.toml). Ids not listed keep their
+    /// relative order after the listed ones.
+    ReorderAccounts(Vec<AccountId>),
     Shutdown,
 }
 
@@ -687,6 +695,7 @@ impl Engine {
                 self.emit(Event::OutboxChanged);
             }
             Command::AddAccount(cfg) => self.add_account(*cfg),
+            Command::ReorderAccounts(order) => self.reorder_accounts(&order),
             Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),
             Command::Shutdown => {}
@@ -1193,6 +1202,17 @@ impl Engine {
             account,
             Op::Destroy { mailbox: copy.mailbox, mailbox_remote: mb.remote.remote_id, remote_ids: vec![rid] },
         );
+    }
+
+    fn reorder_accounts(&mut self, order: &[AccountId]) {
+        if let Some(paths) = &self.paths {
+            let mut file = paths.load_accounts().unwrap_or_default();
+            sort_accounts(&mut file.accounts, order);
+            if let Err(e) = paths.save_accounts(&file) {
+                return self.fail(None, e);
+            }
+        }
+        self.emit(Event::AccountsChanged);
     }
 
     fn add_account(&mut self, cfg: AccountConfig) {

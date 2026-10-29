@@ -115,7 +115,7 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool) -> Render
         "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:;"
     };
     let (fg, bg, quote, link) = if dark {
-        ("#e8e8e8", "#1e1e1e", "#9a9a9a", "#78aeed")
+        ("#c0caf5", "#1e1e1e", "#9a9a9a", "#78aeed")
     } else {
         ("#1c1c1c", "#ffffff", "#6b6b6b", "#1c71d8")
     };
@@ -276,6 +276,18 @@ pub fn date_from(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
 
+/// `items` with `moved` taken out and put just before `target` (or just after it).
+/// Unchanged when either is missing or they're the same item.
+pub fn move_next_to<T: PartialEq + Clone>(items: &[T], moved: &T, target: &T, after: bool) -> Vec<T> {
+    if moved == target || !items.contains(moved) || !items.contains(target) {
+        return items.to_vec();
+    }
+    let mut out: Vec<T> = items.iter().filter(|i| *i != moved).cloned().collect();
+    let at = out.iter().position(|i| i == target).unwrap_or(out.len());
+    out.insert(if after { at + 1 } else { at }, moved.clone());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +375,15 @@ mod tests {
         assert!(r.html.contains("&lt;script&gt;"));
         assert!(!r.html.contains("<script>"));
         assert!(r.html.contains("padding-left:8px") && r.html.contains("padding-left:16px"));
+    }
+
+    #[test]
+    fn move_next_to_reorders_around_the_target() {
+        let v = ["gmail", "demo", "icloud"];
+        assert_eq!(move_next_to(&v, &"icloud", &"gmail", false), ["icloud", "gmail", "demo"], "above");
+        assert_eq!(move_next_to(&v, &"gmail", &"icloud", true), ["demo", "icloud", "gmail"], "below");
+        assert_eq!(move_next_to(&v, &"gmail", &"demo", false), ["gmail", "demo", "icloud"], "already there");
+        assert_eq!(move_next_to(&v, &"gmail", &"gmail", true), v, "onto itself");
+        assert_eq!(move_next_to(&v, &"work", &"gmail", false), v, "unknown item");
     }
 }
