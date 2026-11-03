@@ -74,3 +74,11 @@ listview > row:selected .message-row .subject, row:selected .message-row .subjec
 .viewer-header label.viewer-subject, label.viewer-subject {
   color: #c0caf5; opacity: 1; font-size: 1em; font-weight: 600;
 }
+
+/* New Message: purple field labels and Send button, a purple border on the field you're typing
+   in, and the writing area in the window colour (no lighter box). */
+.compose-field label.dim-label { color: #bb9af7; font-weight: 600; }
+.compose-field entry { border-radius: 8px; outline: 2px solid transparent; outline-offset: -2px; }
+.compose-field entry:focus-within { outline-color: #bb9af7; box-shadow: none; }
+textview.compose-body, textview.compose-body text { background-color: #1a1b26; }
+headerbar button.suggested-action { background-color: #bb9af7; background-image: none; color: #1a1b26; }
