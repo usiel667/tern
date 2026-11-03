@@ -129,6 +129,13 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
     outer.set_content(Some(&split));
     outer.set_min_sidebar_width(200.0);
     outer.set_max_sidebar_width(260.0);
+    outer
+        .bind_property("show-sidebar", &list.sidebar_btn, "tooltip-text")
+        .transform_to(|_, shown: bool| {
+            Some(if shown { "Hide Mailboxes (Ctrl+Shift+M)" } else { "Show Mailboxes (Ctrl+Shift+M)" })
+        })
+        .sync_create()
+        .build();
 
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&outer));

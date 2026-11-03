@@ -94,3 +94,4 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
   reorders them; the order is saved in accounts.toml (`Command::ReorderAccounts`).
 - 2026-10-28: the theme model was approved and built in. It lives in `crates/tern/data/tokyo-night.css` as a bundled resource, loaded at USER+1 priority only while the app is dark, so light mode keeps Adwaita. Dark plain-text bodies use `#c0caf5`. HTML mail still renders on white (undecided).
 - 2026-11-02: New Message in Tokyo Night. Picked from 3 side-by-side variants: purple field labels and Send button (from ②), a purple border on the field you're typing in, and the writing area in the window colour (no lighter box). Lives in `tokyo-night.css`.
+- 2026-11-02: the sidebar button uses Obsidian's "sidebar-left" icon (`tern-sidebar-symbolic`), and its tooltip says Hide or Show Mailboxes to match the sidebar.

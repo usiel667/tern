@@ -20,6 +20,8 @@ pub struct MessageList {
     pub selection: gtk::MultiSelection,
     pub view: gtk::ListView,
     pub search: gtk::SearchEntry,
+    /// Shows or hides the Mailboxes column; its tooltip follows (see app.rs).
+    pub sidebar_btn: gtk::Button,
     search_bar: gtk::SearchBar,
     stack: gtk::Stack,
     empty: adw::StatusPage,
@@ -106,8 +108,8 @@ impl MessageList {
         header.set_title_widget(Some(&title));
 
         let sidebar_btn = gtk::Button::builder()
-            .icon_name("sidebar-show-symbolic")
-            .tooltip_text("Show Mailboxes (Ctrl+Shift+M)")
+            .icon_name("tern-sidebar-symbolic")
+            .tooltip_text("Hide Mailboxes (Ctrl+Shift+M)")
             .action_name("win.toggle-sidebar")
             .build();
         header.pack_start(&sidebar_btn);
@@ -150,6 +152,7 @@ impl MessageList {
             unread_btn,
             spinner,
             sync_btn,
+            sidebar_btn,
             welcome_btn,
             scroller,
             limit: Cell::new(PAGE),
