@@ -21,6 +21,24 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-02 — Sidebar scrollbar stuttered when hovered near its edge
+
+**Seen (owner, 60 fps video):** with the pointer just left of the Mailboxes scrollbar, the
+bar flipped between thin and wide every frame (it jumped about 10 px).
+
+**Cause:** the owner's GTK theme (Tokyo-Night) gives the overlay slider a different size at
+rest (min-width 4, margin 3) than hovered (min-width 8, border 4). GTK decides "hovering"
+from the slider's current size, so in a strip of a few pixels widening the bar moves it under
+the pointer and narrowing moves it away: it toggles forever. Reproduced in the test display
+by sweeping the pointer 1 px at a time: flips at x 255–261.
+
+**Fix (`tokyo-night.css`):** both states take the same 16 px footprint; only the visible width
+changes, via an even 2 px transparent border plus a left margin (8 px at rest, 4 px hovered).
+A first try used a thicker left border instead, which squared off the pill's left end
+(rounded corners clip to the padding box); even borders keep both ends round. Sweep after the
+fix: 0 of 36 positions flip. Leftover: the hovered bar's right edge sits ~4 px left of the
+resting one.
+
 ## 2026-10-27 — Scrolling a message jittered (NVIDIA, 4K at 120 Hz)
 
 **Seen (owner, mouse wheel, every message):** scrolling the message view was jittery and

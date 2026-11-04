@@ -82,3 +82,24 @@ listview > row:selected .message-row .subject, row:selected .message-row .subjec
 .compose-field entry:focus-within { outline-color: #bb9af7; box-shadow: none; }
 textview.compose-body, textview.compose-body text { background-color: #1a1b26; }
 headerbar button.suggested-action { background-color: #bb9af7; background-image: none; color: #1a1b26; }
+
+/* Overlay scrollbars: the same footprint hovered or not (only the look changes). Some GTK
+   themes, the owner's Tokyo-Night one included, size the two states differently; GTK decides
+   "hovering" from the current size, so a pointer at the edge flips it every frame. */
+scrollbar.overlay-indicator > range > trough > slider,
+scrollbar.overlay-indicator:not(.dragging):not(.hovering) > range > trough > slider {
+  margin: 0;
+  transition: background-color 75ms;
+}
+scrollbar.overlay-indicator.vertical > range > trough > slider {
+  min-width: 8px; min-height: 24px; border: 2px solid transparent; margin: 0 0 0 4px;
+}
+scrollbar.overlay-indicator.vertical:not(.dragging):not(.hovering) > range > trough > slider {
+  min-width: 4px; min-height: 24px; border: 2px solid transparent; margin: 0 0 0 8px;
+}
+scrollbar.overlay-indicator.horizontal > range > trough > slider {
+  min-height: 8px; min-width: 24px; border: 2px solid transparent; margin: 4px 0 0 0;
+}
+scrollbar.overlay-indicator.horizontal:not(.dragging):not(.hovering) > range > trough > slider {
+  min-height: 4px; min-width: 24px; border: 2px solid transparent; margin: 8px 0 0 0;
+}
