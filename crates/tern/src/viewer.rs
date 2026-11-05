@@ -35,7 +35,8 @@ pub struct Viewer {
     allow_remote: RefCell<HashSet<MessageId>>,
     /// Switches the open message between darkened and its own colours (dark mode only).
     colors_btn: gtk::Button,
-    /// Messages shown in their own colours instead of darkened (this session).
+    /// Messages switched from the default (darkened, unless Settings turns that off) with the
+    /// sun/moon button, this session.
     original_colors: RefCell<HashSet<MessageId>>,
     unsubscribe: RefCell<Option<String>>,
     opening: Cell<Option<Opening>>,
@@ -61,6 +62,7 @@ fn header_button(icon: &str, tip: &str, action: &str) -> gtk::Button {
 impl Viewer {
     pub fn new() -> Self {
         let header = adw::HeaderBar::new();
+        crate::app::same_toolbar_height(&header);
         header.set_show_title(false);
         header.pack_start(&header_button("tern-archive-symbolic", "Archive (Ctrl+Alt+A)", "win.archive"));
         header.pack_start(&header_button("user-trash-symbolic", "Delete (Delete)", "win.delete"));
@@ -191,6 +193,15 @@ impl Viewer {
         }
     }
 
+    /// Show the open message again (a setting that changes how it looks changed).
+    pub fn rerender(&self, ui: &Rc<Ui>) {
+        if let Some(id) = self.current()
+            && let Ok(Some(b)) = ui.store.borrow().body(id)
+        {
+            self.render(ui, id, &b);
+        }
+    }
+
     pub fn current(&self) -> Option<MessageId> {
         self.current.get()
     }
@@ -282,8 +293,9 @@ impl Viewer {
         self.loading.set_visible(false);
         self.loading.set_spinning(false);
         self.webview.set_visible(true);
-        let allow = self.allow_remote.borrow().contains(&id);
-        let original = self.original_colors.borrow().contains(&id);
+        let settings = ui.settings.borrow().clone();
+        let allow = settings.load_remote_content || self.allow_remote.borrow().contains(&id);
+        let original = self.original_colors.borrow().contains(&id) == settings.darken_html;
         let rendered = render_body(body, allow, ui.is_dark(), original);
         self.remote_banner.set_revealed(rendered.blocked_remote);
         self.colors_btn.set_visible(rendered.darkened.is_some());

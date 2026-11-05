@@ -106,3 +106,9 @@ scrollbar.overlay-indicator.horizontal:not(.dragging):not(.hovering) > range > t
 
 /* Red buttons (Remove Account…): red with dark text, like the purple Send button. */
 button.destructive-action { background-color: #ff757f; background-image: none; color: #1a1b26; }
+
+/* The line under the main window's toolbar row (style.css), in the highlight colour. */
+window.tern-main headerbar { padding-bottom: 6px; box-shadow: inset 0 -2px #292e42; }
+/* The message list has two top bars (toolbar + search); libadwaita puts them in a box set 3px
+   lower than a single toolbar, which broke the line between columns. */
+window.tern-main .top-bar box.collapse-spacing { margin-top: 0; padding-top: 0; }

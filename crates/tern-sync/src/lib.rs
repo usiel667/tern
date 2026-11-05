@@ -194,6 +194,8 @@ pub enum Command {
     SetSignature(AccountId, Option<String>),
     /// An account's sidebar label and the name on mail it sends, saved to accounts.toml.
     SetAccountNames { account: AccountId, description: String, name: Option<String> },
+    /// The app settings, saved to settings.toml.
+    SaveSettings(tern_core::settings::Settings),
     Shutdown,
 }
 
@@ -703,6 +705,11 @@ impl Engine {
             Command::SetSignature(id, signature) => self.set_signature(id, signature),
             Command::SetAccountNames { account, description, name } => {
                 self.set_account_names(account, description, name)
+            }
+            Command::SaveSettings(settings) => {
+                if let Some(Err(e)) = self.paths.as_ref().map(|p| p.save_settings(&settings)) {
+                    self.fail(None, e);
+                }
             }
             Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),

@@ -3,12 +3,15 @@
 use std::path::PathBuf;
 
 use tern_core::account::AccountsFile;
+use tern_core::settings::Settings;
 use tern_core::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct Paths {
     /// `~/.config/tern/accounts.toml`
     pub accounts: PathBuf,
+    /// `~/.config/tern/settings.toml`
+    pub settings: PathBuf,
     /// `~/.local/share/tern/mail.db`
     pub database: PathBuf,
 }
@@ -19,6 +22,7 @@ impl Paths {
             .ok_or_else(|| Error::Config("no home directory".into()))?;
         Ok(Self {
             accounts: dirs.config_dir().join("accounts.toml"),
+            settings: dirs.config_dir().join("settings.toml"),
             database: dirs.data_dir().join("mail.db"),
         })
     }
@@ -28,6 +32,7 @@ impl Paths {
         let dir = dir.into();
         Self {
             accounts: dir.join("accounts.toml"),
+            settings: dir.join("settings.toml"),
             database: dir.join("mail.db"),
         }
     }
@@ -41,15 +46,28 @@ impl Paths {
     }
 
     pub fn save_accounts(&self, file: &AccountsFile) -> Result<()> {
-        if let Some(dir) = self.accounts.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| Error::Config(e.to_string()))?;
-        }
-        let s = toml::to_string_pretty(file).map_err(|e| Error::Config(e.to_string()))?;
-        // Write-then-rename so a crash never leaves a truncated config.
-        let tmp = self.accounts.with_extension("toml.tmp");
-        std::fs::write(&tmp, s).map_err(|e| Error::Config(e.to_string()))?;
-        std::fs::rename(&tmp, &self.accounts).map_err(|e| Error::Config(e.to_string()))
+        write_toml(&self.accounts, file)
     }
+
+    /// The app settings; defaults if the file is missing (or unreadable: they're only preferences).
+    pub fn load_settings(&self) -> Settings {
+        std::fs::read_to_string(&self.settings).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        write_toml(&self.settings, settings)
+    }
+}
+
+fn write_toml(path: &std::path::Path, value: &impl serde::Serialize) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| Error::Config(e.to_string()))?;
+    }
+    let s = toml::to_string_pretty(value).map_err(|e| Error::Config(e.to_string()))?;
+    // Write-then-rename so a crash never leaves a truncated config.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, s).map_err(|e| Error::Config(e.to_string()))?;
+    std::fs::rename(&tmp, path).map_err(|e| Error::Config(e.to_string()))
 }
 
 #[cfg(test)]
@@ -70,6 +88,11 @@ mod tests {
         };
         p.save_accounts(&file).unwrap();
         assert_eq!(p.load_accounts().unwrap(), file);
+
+        assert_eq!(p.load_settings(), Settings::default(), "no file yet");
+        let s = Settings { load_remote_content: true, darken_html: false, zoom_percent: 125, mailboxes_width: Some(240), list_width: None };
+        p.save_settings(&s).unwrap();
+        assert_eq!(p.load_settings(), s);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

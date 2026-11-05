@@ -70,7 +70,19 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
   editable (Enter / ✓ saves; sidebar and sent mail follow), email and type shown, Sign In
   Again…, Remove Account… (red, asks first: mail stays on the server; Tern's copy, password and
   unsent changes go), Add Account… under the list. Red buttons get dark text in Tokyo Night.
-  Next pages: Viewing, General.
+- **2026-11-04 — Settings → Viewing:** Load remote content (off) and Darken messages in dark
+  mode (on), applied to the open message at once; saved to `settings.toml` (new, engine
+  writes it). A Smooth scrolling switch was tried and dropped: measured, it changed nothing
+  on the owner's mouse (hi-res wheel scrolls smoothly anyway).
+- **2026-11-04 — Zoom:** Ctrl+= / Ctrl+− / Ctrl+0 (keypad too) scale the whole app, 70–200%,
+  remembered. Done by changing the app's font DPI. No toast (it was most of the motion the
+  owner saw next to Obsidian); a step still settles over ~3 frames (~0.1 s).
+- **2026-11-04 — Toolbar line:** one 2px line under the three toolbars, level with the top of
+  the search band, the search box centered in the band. The toolbars share one height (size
+  group) and libadwaita's 3px offset for a two-bar top (`box.collapse-spacing`) is removed.
+- **2026-11-04 — Resizable columns:** drag the right edge of Mailboxes (160–480px) or the
+  message list (260–900px); widths remembered. A 4px strip, clear of the scrollbar.
+  Next Settings page: General.
 
 - **2026-11-04 — Dark HTML mail:** in dark mode HTML mail is darkened in Tokyo Night colours
   (white → window `#1a1b26`, black → text `#c0caf5`, hues kept, pictures in their own colours

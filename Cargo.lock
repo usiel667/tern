@@ -2965,6 +2965,7 @@ dependencies = [
  "mail-parser",
  "serde",
  "thiserror 2.0.21",
+ "toml",
  "uuid",
 ]
 

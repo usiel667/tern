@@ -13,5 +13,8 @@ chrono.workspace = true
 mail-parser.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+toml.workspace = true
+
 [lints]
 workspace = true

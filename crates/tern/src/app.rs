@@ -45,6 +45,8 @@ pub struct Ui {
     pub conversations: Cell<bool>,
     pub query: RefCell<String>,
     pub accounts: RefCell<Vec<AccountConfig>>,
+    /// App settings (Settings window); the engine saves them to settings.toml.
+    pub settings: RefCell<tern_core::settings::Settings>,
     pub demo: bool,
     /// Each account's message size limit, as its server reported it.
     pub send_limits: RefCell<std::collections::HashMap<AccountId, u64>>,
@@ -112,20 +114,23 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
     } else {
         engine.paths.load_accounts().map(|f| f.accounts).unwrap_or_default()
     };
+    let settings = if demo { Default::default() } else { engine.paths.load_settings() };
 
     let sidebar = Sidebar::new();
     let list = MessageList::new();
     let viewer = Viewer::new();
 
     let split = adw::NavigationSplitView::new();
-    split.set_sidebar(Some(&adw::NavigationPage::new(&list.root, "Messages")));
+    let (list_column, list_handle) = with_resize_handle(&list.root);
+    split.set_sidebar(Some(&adw::NavigationPage::new(&list_column, "Messages")));
     split.set_content(Some(&adw::NavigationPage::new(&viewer.root, "Message")));
     split.set_min_sidebar_width(320.0);
     split.set_max_sidebar_width(480.0);
     split.set_sidebar_width_fraction(0.38);
 
     let outer = adw::OverlaySplitView::new();
-    outer.set_sidebar(Some(&sidebar.root));
+    let (mailboxes_column, mailboxes_handle) = with_resize_handle(&sidebar.root);
+    outer.set_sidebar(Some(&mailboxes_column));
     outer.set_content(Some(&split));
     outer.set_min_sidebar_width(200.0);
     outer.set_max_sidebar_width(260.0);
@@ -149,6 +154,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         .height_request(400)
         .content(&toasts)
         .build();
+    window.add_css_class("tern-main");
 
     // Collapse panes on narrow windows (tiling layouts), like Apple Mail on iPad.
     let bp = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
@@ -183,6 +189,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         conversations: Cell::new(true),
         query: RefCell::new(String::new()),
         accounts: RefCell::new(accounts),
+        settings: RefCell::new(settings),
         demo,
         send_limits: Default::default(),
         unsent: RefCell::new(None),
@@ -194,6 +201,16 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
 
     crate::sidebar::connect(&ui);
     crate::message_list::connect(&ui);
+    apply_zoom(ui.settings.borrow().zoom_percent);
+    let widths = (ui.settings.borrow().mailboxes_width, ui.settings.borrow().list_width);
+    if let Some(w) = widths.0 {
+        set_column_width(&ui, Column::Mailboxes, w as f64);
+    }
+    if let Some(w) = widths.1 {
+        set_column_width(&ui, Column::List, w as f64);
+    }
+    connect_resize_handle(&ui, &mailboxes_handle, &mailboxes_column, Column::Mailboxes);
+    connect_resize_handle(&ui, &list_handle, &list_column, Column::List);
     crate::viewer::connect(&ui);
     install_actions(&ui);
     spawn_event_loop(&ui);
@@ -483,6 +500,9 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("add-account", Box::new(accounts::open));
     simple("unsent", Box::new(crate::outbox::open));
     simple("preferences", Box::new(crate::prefs::open));
+    simple("zoom-in", Box::new(|ui| zoom(ui, 1)));
+    simple("zoom-out", Box::new(|ui| zoom(ui, -1)));
+    simple("zoom-reset", Box::new(|ui| zoom(ui, 0)));
     simple("toggle-sidebar", Box::new(|ui| ui.outer.set_show_sidebar(!ui.outer.shows_sidebar())));
     simple("goto-inbox", Box::new(|ui| ui.sidebar.select_scope(ui, &ListScope::Role(MailboxRole::Inbox))));
     simple("about", Box::new(|ui| {
@@ -560,6 +580,9 @@ fn install_actions(ui: &Rc<Ui>) {
     let accels: &[(&str, &[&str])] = &[
         ("win.compose", &["<Control>n"]),
         ("win.preferences", &["<Control>comma"]),
+        ("win.zoom-in", &["<Control>equal", "<Control>plus", "<Control>KP_Add"]),
+        ("win.zoom-out", &["<Control>minus", "<Control>KP_Subtract"]),
+        ("win.zoom-reset", &["<Control>0", "<Control>KP_0"]),
         ("win.reply", &["<Control>r"]),
         ("win.reply-all", &["<Control><Shift>r"]),
         ("win.forward", &["<Control><Shift>f"]),
@@ -577,6 +600,132 @@ fn install_actions(ui: &Rc<Ui>) {
     for (action, keys) in accels {
         app.set_accels_for_action(action, keys);
     }
+}
+
+/// The main window's three toolbars (Mailboxes, message list, message) are kept the same
+/// height, so the line under them (style.css) is one straight line at any zoom.
+pub fn same_toolbar_height(header: &adw::HeaderBar) {
+    thread_local! {
+        static TOOLBARS: gtk::SizeGroup = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+    }
+    TOOLBARS.with(|g| g.add_widget(header));
+}
+
+#[derive(Clone, Copy)]
+enum Column {
+    Mailboxes,
+    List,
+}
+
+/// `column` with a thin strip on its right edge that the mouse drags to resize it (the split
+/// views have no handle of their own). Narrow enough to stay clear of the scrollbar.
+fn with_resize_handle(column: &impl IsA<gtk::Widget>) -> (gtk::Overlay, gtk::Box) {
+    let handle = gtk::Box::builder()
+        .width_request(4)
+        .halign(gtk::Align::End)
+        .cursor(&gtk::gdk::Cursor::from_name("col-resize", None).expect("cursor"))
+        .css_classes(["column-resize"])
+        .build();
+    let overlay = gtk::Overlay::builder().child(column).build();
+    overlay.add_overlay(&handle);
+    (overlay, handle)
+}
+
+/// Sizes a column to `width` pixels (its pane's min and max both).
+fn set_column_width(ui: &Ui, column: Column, width: f64) {
+    match column {
+        Column::Mailboxes => {
+            let w = width.clamp(160.0, 480.0);
+            ui.outer.set_sidebar_width_unit(adw::LengthUnit::Px);
+            ui.outer.set_min_sidebar_width(w);
+            ui.outer.set_max_sidebar_width(w);
+        }
+        Column::List => {
+            let w = width.clamp(260.0, 900.0);
+            ui.split.set_sidebar_width_unit(adw::LengthUnit::Px);
+            ui.split.set_min_sidebar_width(w);
+            ui.split.set_max_sidebar_width(w);
+        }
+    }
+}
+
+/// Dragging the handle resizes the column live; letting go saves the width in the settings.
+/// Positions are taken in window coordinates: the handle moves with the edge it drags.
+fn connect_resize_handle(ui: &Rc<Ui>, handle: &gtk::Box, column: &gtk::Overlay, which: Column) {
+    let drag = gtk::GestureDrag::new();
+    // (column width, pointer x in the window) when the drag began
+    let start = Rc::new(std::cell::Cell::new((0.0, 0.0)));
+    let window_x = {
+        let (handle, ui) = (handle.clone(), Rc::downgrade(ui));
+        move |g: &gtk::GestureDrag| -> Option<f64> {
+            let (x, y) = g.point(None)?;
+            let ui = ui.upgrade()?;
+            handle.compute_point(&ui.window, &gtk::graphene::Point::new(x as f32, y as f32)).map(|p| p.x() as f64)
+        }
+    };
+    {
+        let (start, column, window_x) = (start.clone(), column.clone(), window_x.clone());
+        drag.connect_drag_begin(move |g, _, _| {
+            if let Some(x) = window_x(g) {
+                start.set((column.width() as f64, x));
+            }
+        });
+    }
+    {
+        let (ui, start) = (Rc::downgrade(ui), start.clone());
+        drag.connect_drag_update(move |g, _, _| {
+            if let (Some(ui), Some(x)) = (ui.upgrade(), window_x(g)) {
+                let (w, x0) = start.get();
+                set_column_width(&ui, which, w + x - x0);
+            }
+        });
+    }
+    {
+        let (ui, column) = (Rc::downgrade(ui), column.clone());
+        drag.connect_drag_end(move |_, _, _| {
+            let Some(ui) = ui.upgrade() else { return };
+            let w = Some(column.width().max(0) as u32);
+            match which {
+                Column::Mailboxes => ui.settings.borrow_mut().mailboxes_width = w,
+                Column::List => ui.settings.borrow_mut().list_width = w,
+            }
+            ui.send(Command::SaveSettings(ui.settings.borrow().clone()));
+        });
+    }
+    handle.add_controller(drag);
+}
+
+/// Sizes Ctrl+= and Ctrl+- step through, in percent.
+const ZOOM_STEPS: &[u32] = &[70, 80, 90, 100, 110, 125, 150, 175, 200];
+
+/// One step bigger (`1`), smaller (`-1`), or back to 100% (`0`); saved in the settings.
+fn zoom(ui: &Rc<Ui>, step: i32) {
+    let now = ui.settings.borrow().zoom_percent;
+    let next = match step {
+        0 => 100,
+        s if s > 0 => ZOOM_STEPS.iter().copied().find(|&z| z > now).unwrap_or(now),
+        _ => ZOOM_STEPS.iter().rev().copied().find(|&z| z < now).unwrap_or(now),
+    };
+    apply_zoom(next);
+    ui.settings.borrow_mut().zoom_percent = next;
+    ui.send(Command::SaveSettings(ui.settings.borrow().clone()));
+}
+
+/// Scales every window of the app (text and everything sized by it, messages included) by
+/// changing this process's font DPI. The desktop's own value is read once, before any change.
+pub fn apply_zoom(percent: u32) {
+    thread_local! {
+        static DESKTOP_DPI: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+    }
+    let Some(settings) = gtk::Settings::default() else { return };
+    let desktop = DESKTOP_DPI.with(|d| {
+        d.get().unwrap_or_else(|| {
+            let dpi = Some(settings.gtk_xft_dpi()).filter(|v| *v > 0).unwrap_or(96 * 1024);
+            d.set(Some(dpi));
+            dpi
+        })
+    });
+    settings.set_gtk_xft_dpi((desktop as i64 * percent as i64 / 100) as i32);
 }
 
 fn respond(ui: &Rc<Ui>, kind: tern_core::compose::ReplyKind) {

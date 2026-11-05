@@ -105,6 +105,7 @@ impl MessageList {
 
         let title = adw::WindowTitle::new("All Inboxes", "");
         let header = adw::HeaderBar::new();
+        crate::app::same_toolbar_height(&header);
         header.set_title_widget(Some(&title));
 
         let sidebar_btn = gtk::Button::builder()

@@ -42,6 +42,7 @@ impl Sidebar {
             .build();
 
         let header = adw::HeaderBar::new();
+        crate::app::same_toolbar_height(&header);
         header.set_title_widget(Some(&adw::WindowTitle::new("Mailboxes", "")));
         let menu = gtk::gio::Menu::new();
         menu.append(Some("Add Account…"), Some("win.add-account"));

@@ -1,4 +1,4 @@
-//! Settings window (Ctrl+,). Pages so far: Accounts, Signatures.
+//! Settings window (Ctrl+,). Pages so far: Accounts, Viewing, Signatures.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,6 +18,7 @@ const SAVE_DELAY: Duration = Duration::from_millis(500);
 pub fn open(ui: &Rc<Ui>) {
     let dialog = adw::PreferencesDialog::builder().title("Settings").build();
     dialog.add(&accounts_page(ui, &dialog));
+    dialog.add(&viewing_page(ui));
     dialog.add(&signatures_page(ui, &dialog));
     dialog.present(Some(&ui.window));
 }
@@ -140,6 +141,43 @@ fn accounts_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) -> adw::Preferenc
     });
     group.add(&columns);
     page.add(&group);
+    page
+}
+
+/// App-wide switches for reading mail. Each takes effect at once on the open message.
+fn viewing_page(ui: &Rc<Ui>) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder().title("Viewing").icon_name("view-reveal-symbolic").build();
+    let s = ui.settings.borrow().clone();
+    let messages = adw::PreferencesGroup::builder().title("Messages").build();
+    let remote = adw::SwitchRow::builder()
+        .title("Load remote content")
+        .subtitle("Images and fonts from the internet, in every message. Senders can tell when you’ve opened their mail.")
+        .active(s.load_remote_content)
+        .build();
+    let darken = adw::SwitchRow::builder()
+        .title("Darken messages in dark mode")
+        .subtitle("For mail without dark colors of its own. The sun button shows a message’s original colors.")
+        .active(s.darken_html)
+        .build();
+    messages.add(&remote);
+    messages.add(&darken);
+    page.add(&messages);
+
+    let save = {
+        let ui = ui.clone();
+        move |change: &dyn Fn(&mut tern_core::settings::Settings)| {
+            change(&mut ui.settings.borrow_mut());
+            let s = ui.settings.borrow().clone();
+            ui.viewer.rerender(&ui);
+            ui.send(Command::SaveSettings(s));
+        }
+    };
+    let save = Rc::new(save);
+    {
+        let save = save.clone();
+        remote.connect_active_notify(move |r| save(&|s| s.load_remote_content = r.is_active()));
+    }
+    darken.connect_active_notify(move |r| save(&|s| s.darken_html = r.is_active()));
     page
 }
 
