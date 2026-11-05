@@ -838,7 +838,7 @@ async fn demo_history_loads_until_exhausted() {
         rounds += 1;
         assert!(rounds < 10);
     }
-    assert_eq!(cached(&engine, id), 607, "7 recent + 600 generated");
+    assert_eq!(cached(&engine, id), 609, "9 recent + 600 generated");
     assert_eq!(rounds, 3, "250 per batch");
 
     // Archiving an old message: it shows up in Archive, not lost below its window.

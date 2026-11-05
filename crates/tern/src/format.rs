@@ -100,6 +100,45 @@ pub fn format_address(a: &Address) -> String {
 pub struct RenderedBody {
     pub html: String,
     pub blocked_remote: bool,
+    /// The WebView colour behind the page, so loading never flashes a different one.
+    pub background: &'static str,
+    /// `Some` when the message can be shown darkened (dark mode, HTML without dark styles of
+    /// its own): whether it is. The viewer's Original Colors button follows it.
+    pub darkened: Option<bool>,
+}
+
+/// Tokyo Night's window colour, behind every message in dark mode.
+const DARK_BG: &str = "#1a1b26";
+
+/// Dark mode, mail with its own dark styles (or shown in its original colours): the page on a
+/// rounded sheet inside the dark window.
+const CARD_CSS: &str = "html{background:#1a1b26}body{background:#fff;color:#1c1c1c;margin:12px 16px!important;\
+    padding:16px 20px;border-radius:12px}";
+
+/// Dark mode, any other HTML mail: three layers fixed over the visible area turn the page
+/// dark. The first inverts what's behind it and turns hues back round (so colours keep their
+/// hue), the second multiplies by the text colour (#c0caf5) and the third lifts the darkest
+/// colours to the window colour (#1a1b26). Pictures are inverted first, so they come out with
+/// their own colours (with a slight blue cast). Filtering only the visible area, not the whole
+/// page, matters: a filter over a tall email made a layer too big to draw and the page went
+/// blank at 4K. Pure CSS: scripts stay off and nothing is fetched.
+const FORCED_DARK_CSS: &str = "html{background:#fff;color:#1c1c1c}\
+    img,video,picture,svg,[background],[style*=background-image]{filter:invert(1) hue-rotate(180deg)}\
+    #tern-dark-1,#tern-dark-2,#tern-dark-3{position:fixed!important;inset:0!important;margin:0!important;\
+    padding:0!important;border:0!important;pointer-events:none!important;z-index:2147483647!important}\
+    #tern-dark-1{backdrop-filter:invert(1) hue-rotate(180deg)}\
+    #tern-dark-2{background:#c0caf5!important;mix-blend-mode:multiply}\
+    #tern-dark-3{background:#1a1b26!important;mix-blend-mode:lighten}";
+const FORCED_DARK_LAYERS: &str = "<div id=tern-dark-1></div><div id=tern-dark-2></div><div id=tern-dark-3></div>";
+
+/// Whether HTML mail ships its own dark-mode styles (WebKit then applies them itself).
+fn has_own_dark_styles(html: &str) -> bool {
+    let l = html.to_ascii_lowercase();
+    l.contains("prefers-color-scheme")
+        || l.split("<meta").skip(1).any(|m| {
+            let tag = m.split('>').next().unwrap_or("");
+            tag.contains("color-scheme") && tag.contains("dark")
+        })
 }
 
 /// Build a locked-down HTML document for a message body.
@@ -108,14 +147,16 @@ pub struct RenderedBody {
 ///   (tracking pixels, remote fonts) — Apple Mail's "Load Remote Content".
 /// * `cid:` inline images are rewritten to `data:` URIs from the raw message.
 /// * Plain text is escaped, link-ified, and quote levels are styled.
-pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool) -> RenderedBody {
+/// * In dark mode HTML mail is darkened unless it has dark styles of its own or
+///   `original_colors` (then it sits on a white sheet).
+pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool, original_colors: bool) -> RenderedBody {
     let csp = if allow_remote {
         "default-src 'none'; img-src * data:; style-src * 'unsafe-inline'; font-src * data:; media-src *;"
     } else {
         "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:;"
     };
     let (fg, bg, quote, link) = if dark {
-        ("#c0caf5", "#1e1e1e", "#9a9a9a", "#78aeed")
+        ("#c0caf5", DARK_BG, "#9a9a9a", "#78aeed")
     } else {
         ("#1c1c1c", "#ffffff", "#6b6b6b", "#1c71d8")
     };
@@ -129,14 +170,21 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool) -> Render
         Some(html) => {
             let html = inline_cid_images(html, body);
             let blocked_remote = !allow_remote && has_remote_resources(&html);
-            // HTML mail is designed for a white page; keep it white even in dark mode
-            // (Apple Mail does the same unless the message opts into dark styles).
+            let (page, layers, background, darkened) = if !dark {
+                ("body{background:#fff;color:#1c1c1c}", "", "#ffffff", None)
+            } else if has_own_dark_styles(&html) {
+                (CARD_CSS, "", DARK_BG, None)
+            } else if original_colors {
+                (CARD_CSS, "", DARK_BG, Some(false))
+            } else {
+                (FORCED_DARK_CSS, FORCED_DARK_LAYERS, DARK_BG, Some(true))
+            };
             let doc = format!(
                 "<!doctype html><html><head><meta charset=utf-8>\
                  <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
-                 <style>{base_css} body{{background:#fff;color:#1c1c1c}}</style></head><body>{html}</body></html>"
+                 <style>{base_css} {page}</style></head><body>{layers}{html}</body></html>"
             );
-            RenderedBody { html: doc, blocked_remote }
+            RenderedBody { html: doc, blocked_remote, background, darkened }
         }
         None => {
             let text = body.text.as_deref().unwrap_or("");
@@ -164,7 +212,7 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool) -> Render
                  <style>{base_css} body{{background:{bg};color:{fg};white-space:pre-wrap}} a{{color:{link}}}</style>\
                  </head><body>{out}</body></html>"
             );
-            RenderedBody { html: doc, blocked_remote: false }
+            RenderedBody { html: doc, blocked_remote: false, background: bg, darkened: None }
         }
     }
 }
@@ -359,10 +407,10 @@ mod tests {
     #[test]
     fn remote_content_blocked_by_default() {
         let b = body(None, Some(r#"<p>Hi</p><img src="https://t.example/p.gif">"#));
-        let r = render_body(&b, false, false);
+        let r = render_body(&b, false, false, false);
         assert!(r.blocked_remote);
         assert!(r.html.contains("img-src data:;"));
-        let r = render_body(&b, true, false);
+        let r = render_body(&b, true, false, false);
         assert!(!r.blocked_remote);
         assert!(r.html.contains("img-src * data:"));
     }
@@ -370,11 +418,36 @@ mod tests {
     #[test]
     fn plain_text_is_escaped_linked_and_quoted() {
         let b = body(Some("See https://x.com/a.\n<script>\n> quoted\n>> deeper"), None);
-        let r = render_body(&b, false, true);
+        let r = render_body(&b, false, true, false);
         assert!(r.html.contains("<a href=\"https://x.com/a\">https://x.com/a</a>."));
         assert!(r.html.contains("&lt;script&gt;"));
         assert!(!r.html.contains("<script>"));
         assert!(r.html.contains("padding-left:8px") && r.html.contains("padding-left:16px"));
+    }
+
+    #[test]
+    fn dark_mode_darkens_html_unless_it_has_its_own_dark_styles() {
+        let plain = body(None, Some("<p style=\"color:#333\">Sale</p>"));
+        let r = render_body(&plain, false, true, false);
+        assert_eq!(r.darkened, Some(true));
+        assert!(r.html.contains("tern-dark-1") && r.background == "#1a1b26");
+        let r = render_body(&plain, false, true, true);
+        assert_eq!(r.darkened, Some(false), "original colours");
+        assert!(!r.html.contains("tern-dark") && r.html.contains("border-radius:12px"));
+        let r = render_body(&plain, false, false, false);
+        assert_eq!(r.darkened, None, "light mode");
+        assert!(!r.html.contains("tern-dark") && r.background == "#ffffff");
+
+        for own in [
+            "<style>@media (prefers-color-scheme: dark){body{background:#000}}</style>",
+            "<meta name=\"color-scheme\" content=\"light dark\"><p>Hi</p>",
+        ] {
+            let r = render_body(&body(None, Some(own)), false, true, false);
+            assert_eq!(r.darkened, None, "{own}");
+            assert!(!r.html.contains("tern-dark"), "{own}");
+        }
+        let light_only = body(None, Some("<meta name=\"color-scheme\" content=\"light\"><p>dark chocolate</p>"));
+        assert_eq!(render_body(&light_only, false, true, false).darkened, Some(true));
     }
 
     #[test]

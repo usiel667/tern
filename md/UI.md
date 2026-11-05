@@ -61,6 +61,14 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
+- **2026-11-04 — Dark HTML mail:** in dark mode HTML mail is darkened in Tokyo Night colours
+  (white → window `#1a1b26`, black → text `#c0caf5`, hues kept, pictures in their own colours
+  with a slight blue cast). Mail that ships its own dark styles keeps them, on a rounded card.
+  A sun button (left of Flag) shows a message in its original colours on a white card; a moon
+  switches back (per message, this session). Plain text uses `#1a1b26` (was `#1e1e1e`). Picked
+  from four side-by-side variants (owner: force dark for normal mail, the card for mail with
+  its own dark mode; tint it; sun/moon icons that swap).
+
 - **2026-10-21 — Undo Send:** Send closes the window and shows "Sending “Subject”…" with
   **Undo** for 10 seconds (Apple Mail's default), then "Message sent". Undo reopens the same
   window with "Not sent — saved to Drafts". Long subjects are cut at 40 characters.

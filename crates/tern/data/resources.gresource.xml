@@ -4,6 +4,8 @@
     <file preprocess="xml-stripblanks" alias="tern-inbox-symbolic.svg">icons/tern-inbox-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="tern-archive-symbolic.svg">icons/tern-archive-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="tern-sidebar-symbolic.svg">icons/tern-sidebar-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-sun-symbolic.svg">icons/tern-sun-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-moon-symbolic.svg">icons/tern-moon-symbolic.svg</file>
   </gresource>
   <gresource prefix="/dev/tern/Tern">
     <file>style.css</file>

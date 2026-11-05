@@ -46,6 +46,18 @@ static void button(int pressed) {
     zwlr_virtual_pointer_v1_frame(ptr);
     flush();
 }
+// One mouse-wheel notch per step (positive = down), like a real wheel.
+static void scroll(int notches) {
+    int dir = notches < 0 ? -1 : 1;
+    for (int i = 0; i < notches * dir; i++) {
+        zwlr_virtual_pointer_v1_axis_source(ptr, WL_POINTER_AXIS_SOURCE_WHEEL);
+        zwlr_virtual_pointer_v1_axis_discrete(ptr, now(), WL_POINTER_AXIS_VERTICAL_SCROLL,
+                                              wl_fixed_from_int(15 * dir), dir);
+        zwlr_virtual_pointer_v1_frame(ptr);
+        flush();
+        usleep(30000);
+    }
+}
 // Move in small steps so toolkits see a real drag (past their threshold) and enter/leave.
 static void glide(int x, int y) {
     int x0 = cx, y0 = cy, steps = 30;
@@ -73,6 +85,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(c, "down")) button(1);
         else if (!strcmp(c, "up")) button(0);
         else if (!strcmp(c, "click")) { button(1); usleep(50000); button(0); }
+        else if (!strcmp(c, "scroll") && i + 1 < argc) { scroll(atoi(argv[++i])); }
         else if (!strcmp(c, "sleep") && i + 1 < argc) { usleep(atoi(argv[++i]) * 1000); }
         else if (!strcmp(c, "drag") && i + 4 < argc) {
             move(atoi(argv[i + 1]), atoi(argv[i + 2]));

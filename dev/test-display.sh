@@ -11,7 +11,8 @@
 #                                             # (a Python regex, searched) and press keys
 #   dev/test-display.sh type TITLE TEXT       # type TEXT (letters, digits, common punctuation)
 #   dev/test-display.sh pointer CMD…          # virtual mouse: move X Y | glide X Y | click |
-#                                             #   down | up | sleep MS | drag X1 Y1 X2 Y2
+#                                             #   down | up | sleep MS | drag X1 Y1 X2 Y2 |
+#                                             #   scroll N (wheel notches, negative = up)
 #   dev/test-display.sh shot FILE.png         # screenshot the whole nested display
 #   dev/test-display.sh stop
 #

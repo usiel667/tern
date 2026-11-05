@@ -33,6 +33,10 @@ pub struct Viewer {
     loading: gtk::Spinner,
     current: Cell<Option<MessageId>>,
     allow_remote: RefCell<HashSet<MessageId>>,
+    /// Switches the open message between darkened and its own colours (dark mode only).
+    colors_btn: gtk::Button,
+    /// Messages shown in their own colours instead of darkened (this session).
+    original_colors: RefCell<HashSet<MessageId>>,
     unsubscribe: RefCell<Option<String>>,
     opening: Cell<Option<Opening>>,
 }
@@ -65,6 +69,8 @@ impl Viewer {
         header.pack_end(&header_button("mail-reply-all-symbolic", "Reply All (Ctrl+Shift+R)", "win.reply-all"));
         header.pack_end(&header_button("mail-reply-sender-symbolic", "Reply (Ctrl+R)", "win.reply"));
         header.pack_end(&header_button("starred-symbolic", "Flag (Ctrl+Shift+L)", "win.toggle-flag"));
+        let colors_btn = gtk::Button::builder().icon_name("tern-sun-symbolic").visible(false).build();
+        header.pack_end(&colors_btn);
 
         let avatar = adw::Avatar::new(44, None, true);
         avatar.set_valign(gtk::Align::Start);
@@ -179,6 +185,8 @@ impl Viewer {
             current: Cell::new(None),
             opening: Cell::new(None),
             allow_remote: RefCell::new(HashSet::new()),
+            colors_btn,
+            original_colors: RefCell::new(HashSet::new()),
             unsubscribe: RefCell::new(None),
         }
     }
@@ -189,12 +197,14 @@ impl Viewer {
 
     pub fn clear(&self) {
         self.current.set(None);
+        self.colors_btn.set_visible(false);
         self.status.set_title("No Message Selected");
         self.stack.set_visible_child_name("empty");
     }
 
     pub fn show_multiple(&self, n: usize) {
         self.current.set(None);
+        self.colors_btn.set_visible(false);
         self.status.set_title(&format!("{n} Messages Selected"));
         self.stack.set_visible_child_name("empty");
     }
@@ -227,6 +237,7 @@ impl Viewer {
 
         if !same {
             self.remote_banner.set_revealed(false);
+            self.colors_btn.set_visible(false);
             self.unsub_banner.set_revealed(false);
             while let Some(c) = self.attachments.first_child() {
                 self.attachments.remove(&c);
@@ -272,10 +283,19 @@ impl Viewer {
         self.loading.set_spinning(false);
         self.webview.set_visible(true);
         let allow = self.allow_remote.borrow().contains(&id);
-        let rendered = render_body(body, allow, ui.is_dark());
+        let original = self.original_colors.borrow().contains(&id);
+        let rendered = render_body(body, allow, ui.is_dark(), original);
         self.remote_banner.set_revealed(rendered.blocked_remote);
-        let bg = if body.html.is_some() || !ui.is_dark() { "#ffffff" } else { "#1e1e1e" };
-        if let Ok(rgba) = gdk::RGBA::parse(bg) {
+        self.colors_btn.set_visible(rendered.darkened.is_some());
+        // A sun while darkened (back to the original light page), a moon while original.
+        let (icon, tip) = if rendered.darkened == Some(true) {
+            ("tern-sun-symbolic", "Show Original Colors")
+        } else {
+            ("tern-moon-symbolic", "Show in Dark Colors")
+        };
+        self.colors_btn.set_icon_name(icon);
+        self.colors_btn.set_tooltip_text(Some(tip));
+        if let Ok(rgba) = gdk::RGBA::parse(rendered.background) {
             self.webview.set_background_color(&rgba);
         }
         self.webview.load_html(&rendered.html, Some("about:blank"));
@@ -417,6 +437,22 @@ pub fn connect(ui: &Rc<Ui>) {
             let Some(ui) = weak.upgrade() else { return };
             if let Some(id) = ui.viewer.current() {
                 crate::compose::open_draft(&ui, id);
+            }
+        });
+    }
+    {
+        let weak = Rc::downgrade(ui);
+        v.colors_btn.connect_clicked(move |_| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(id) = ui.viewer.current() {
+                let mut set = ui.viewer.original_colors.borrow_mut();
+                if !set.remove(&id) {
+                    set.insert(id);
+                }
+                drop(set);
+                if let Ok(Some(b)) = ui.store.borrow().body(id) {
+                    ui.viewer.render(&ui, id, &b);
+                }
             }
         });
     }

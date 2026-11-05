@@ -21,6 +21,32 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-04 — Dark HTML mail: blank page, no scrolling, read mail with dots
+
+Three bugs the owner found on the first build of dark HTML mail (all from 60 fps recordings
+of DP-2; none showed up in the demo).
+
+**Darkened mail went blank.** A long, picture-heavy newsletter drew for a moment (sometimes
+only its pictures) and then showed nothing but the background; a shorter one was fine. The
+first version put a colour filter (`filter:` on `body`, SVG `feColorMatrix`, later CSS
+`invert()`) over the whole page. At 4K and scale 1.5 a tall email makes that one filtered
+layer too big to draw; the pictures, which had their own small filter layers, still showed.
+Not reproducible in the test display, even at scale 1.5 with a 30,000 px email. A wrong
+guess on the way: the list refreshing every second or two reloaded the page (a skip-reload
+check logged 0 skips, so it was dropped). **Fix:** filter only the visible area: three
+`position:fixed` layers (backdrop-filter `invert(1) hue-rotate(180deg)`, multiply by
+`#c0caf5`, lighten with `#1a1b26`); pictures are inverted first so they come out right.
+
+**Original colours wouldn't scroll.** The white card had `overflow:hidden` on `body` (to clip
+its rounded corners); `body`'s overflow applies to the whole page, so nothing scrolled.
+Removed.
+
+**Every read message showed the unread dot in dark mode** (since e168c63).
+`tokyo-night.css` set `.unread-dot { background }` at USER+1 priority, which beats
+`style.css`'s `.unread-dot.read { background: transparent }` whatever the selectors.
+Now `.unread-dot:not(.read)`. Lesson: a rule in the higher-priority theme file overrides
+*every* state rule in style.css for that element, not just the default.
+
 ## 2026-11-02 — Sidebar scrollbar stuttered when hovered near its edge
 
 **Seen (owner, 60 fps video):** with the pointer just left of the Mailboxes scrollbar, the

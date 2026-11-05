@@ -64,7 +64,7 @@ row.account-header.pressed .section-toggle, row.account-header.dragging .section
 .message-row .preview { color: #565f89; }
 .message-row .date { color: #e0af68; }
 .message-row .thread-count, row:selected .message-row .thread-count { color: #bb9af7; }
-.unread-dot { background: #80d0ff; }
+.unread-dot:not(.read) { background: #80d0ff; } /* read rows keep style.css's hidden dot */
 listview > row:selected .message-row .sender, row:selected .message-row .sender { color: #ff757f; }
 listview > row:selected .message-row .subject, row:selected .message-row .subject { color: #bb9af7; }
 
