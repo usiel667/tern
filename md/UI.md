@@ -61,6 +61,13 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Done
 
+- **2026-11-04 — Settings window, Signatures page:** ⋮ menu → Settings… (Ctrl+,). Apple Mail's
+  layout: accounts on the left, the chosen account's signature on the right under an "Add a
+  signature" switch (picked from three side-by-side layouts: two columns + the switch from the
+  subpage one). Saves 0.5 s after typing stops and on close, to accounts.toml. Changing From
+  in New Message swaps in that account's signature (left alone if edited by hand). Next pages:
+  Accounts (Remove Account), Viewing, General.
+
 - **2026-11-04 — Dark HTML mail:** in dark mode HTML mail is darkened in Tokyo Night colours
   (white → window `#1a1b26`, black → text `#c0caf5`, hues kept, pictures in their own colours
   with a slight blue cast). Mail that ships its own dark styles keeps them, on a rounded card.

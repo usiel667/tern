@@ -14,6 +14,7 @@ mod folder_zip;
 mod format;
 mod message_list;
 mod outbox;
+mod prefs;
 mod sidebar;
 mod viewer;
 

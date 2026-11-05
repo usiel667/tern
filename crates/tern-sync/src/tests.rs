@@ -1115,3 +1115,25 @@ async fn message_held_when_tern_quit_is_sent_on_next_start() {
     engine.settle().await;
     assert_eq!(submits(&fake).len(), 1);
 }
+
+#[tokio::test]
+async fn set_signature_saves_it_to_the_accounts_file() {
+    let dir = std::env::temp_dir().join(format!("tern-signature-{}", uuid::Uuid::new_v4()));
+    let paths = crate::config::Paths::in_dir(&dir);
+    let cfg = tern_core::account::AccountConfig::preset(Provider::ICloud, "Tom", "tom@icloud.com");
+    let other = tern_core::account::AccountConfig::preset(Provider::Fastmail, "Tom", "tom@fastmail.com");
+    paths.save_accounts(&tern_core::account::AccountsFile { accounts: vec![cfg.clone(), other.clone()] }).unwrap();
+    let (tx, rx) = async_channel::unbounded();
+    let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.paths = Some(paths.clone());
+
+    engine.handle(Command::SetSignature(cfg.id, Some("Tom\nSent from Tern".into())));
+    let file = paths.load_accounts().unwrap();
+    assert_eq!(file.accounts[0].signature.as_deref(), Some("Tom\nSent from Tern"));
+    assert_eq!(file.accounts[1].signature, None, "other accounts untouched");
+    assert!(matches!(rx.try_recv(), Ok(Event::AccountsChanged)));
+
+    engine.handle(Command::SetSignature(cfg.id, None));
+    assert_eq!(paths.load_accounts().unwrap().accounts[0].signature, None);
+    std::fs::remove_dir_all(dir).unwrap();
+}

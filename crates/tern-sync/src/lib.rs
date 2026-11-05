@@ -190,6 +190,8 @@ pub enum Command {
     /// The accounts' new sidebar order (saved to accounts.toml). Ids not listed keep their
     /// relative order after the listed ones.
     ReorderAccounts(Vec<AccountId>),
+    /// An account's signature (`None` = no signature), saved to accounts.toml.
+    SetSignature(AccountId, Option<String>),
     Shutdown,
 }
 
@@ -696,6 +698,7 @@ impl Engine {
             }
             Command::AddAccount(cfg) => self.add_account(*cfg),
             Command::ReorderAccounts(order) => self.reorder_accounts(&order),
+            Command::SetSignature(id, signature) => self.set_signature(id, signature),
             Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),
             Command::Shutdown => {}
@@ -1210,6 +1213,18 @@ impl Engine {
             sort_accounts(&mut file.accounts, order);
             if let Err(e) = paths.save_accounts(&file) {
                 return self.fail(None, e);
+            }
+        }
+        self.emit(Event::AccountsChanged);
+    }
+
+    fn set_signature(&mut self, id: AccountId, signature: Option<String>) {
+        if let Some(paths) = &self.paths {
+            let mut file = paths.load_accounts().unwrap_or_default();
+            let Some(a) = file.accounts.iter_mut().find(|a| a.id == id) else { return };
+            a.signature = signature;
+            if let Err(e) = paths.save_accounts(&file) {
+                return self.fail(Some(id), e);
             }
         }
         self.emit(Event::AccountsChanged);

@@ -96,6 +96,27 @@ fn with_signature(text: &str, sig: &str) -> String {
     }
 }
 
+/// The body with the From account's signature swapped in when From changes, like Apple Mail:
+/// `old`'s block is replaced by `new`'s (or removed); with no old one, `new` goes above the
+/// quoted text (`quote`, as the window opened) or at the end. `None` when the old block isn't
+/// there as inserted (edited by hand), so it's left alone.
+fn swap_signature(text: &str, quote: &str, old: Option<&str>, new: Option<&str>) -> Option<String> {
+    let block = |s: &str| format!("\n\n-- \n{s}");
+    let (at, len) = match old {
+        // The whole block, ending the text or right before the quote ("Tom" isn't "Tom R.").
+        Some(o) => {
+            let b = block(o);
+            let at = text.match_indices(&b).map(|(i, _)| i).find(|&i| {
+                let rest = &text[i + b.len()..];
+                rest.is_empty() || (!quote.is_empty() && rest.starts_with(quote))
+            })?;
+            (at, b.len())
+        }
+        None => (text.rfind(quote).filter(|_| !quote.is_empty()).unwrap_or(text.len()), 0),
+    };
+    Some(format!("{}{}{}", &text[..at], new.map(block).unwrap_or_default(), &text[at + len..]))
+}
+
 /// Header values from a link must not carry line breaks.
 fn single_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ")
@@ -170,7 +191,12 @@ struct Compose {
     /// Opened from a Drafts message (that copy is this draft until replaced).
     from_draft: Cell<bool>,
     /// The body as the window opened (signature, quote), to tell real content from none.
-    initial_text: String,
+    /// A From change swaps the signature here too.
+    initial_text: RefCell<String>,
+    /// The signature put in the body, if signatures are added here (`None` inside: none yet).
+    signature: Option<RefCell<Option<String>>>,
+    /// The quoted or forwarded text the window opened with (empty if none).
+    quote: String,
     /// Changed since the window opened / since the last save.
     edited: Cell<bool>,
     dirty: Cell<bool>,
@@ -252,8 +278,8 @@ fn open(
         .and_then(|a| ui.account_for(a))
         .and_then(|a| a.signature)
         .filter(|_| add_signature);
-    let text = match signature {
-        Some(sig) => with_signature(&draft.text, &sig),
+    let text = match &signature {
+        Some(sig) => with_signature(&draft.text, sig),
         None => draft.text.clone(),
     };
     body.buffer().set_text(&text);
@@ -359,7 +385,9 @@ fn open(
         ui: Rc::downgrade(ui),
         draft_key: glib::uuid_string_random().to_string(),
         from_draft: Cell::new(from_draft.is_some()),
-        initial_text: text.clone(),
+        initial_text: RefCell::new(text.clone()),
+        signature: add_signature.then(|| RefCell::new(signature)),
+        quote: if draft.text.starts_with('\n') { draft.text.clone() } else { String::new() },
         edited: Cell::new(false),
         dirty: Cell::new(false),
         saved: Cell::new(from_draft.is_some()),
@@ -389,6 +417,7 @@ fn open(
         let w = Rc::downgrade(&c);
         c.from.connect_selected_notify(move |_| {
             if let Some(c) = w.upgrade() {
+                swap_signature_for_from(&c);
                 changed(&c);
             }
         });
@@ -748,6 +777,27 @@ fn add_files(c: &Rc<Compose>, files: Vec<gio::File>) {
 // ------------------------------------------------------------------ drafts
 
 /// Something changed: remember it, and save once typing pauses.
+/// From changed: put the new account's signature in place of the old one.
+fn swap_signature_for_from(c: &Compose) {
+    let (Some(current), Some(ui)) = (&c.signature, c.ui.upgrade()) else { return };
+    let new = ui.account_for(c.accounts[c.from.selected() as usize].0).and_then(|a| a.signature);
+    let old = current.borrow().clone();
+    if old == new {
+        return;
+    }
+    let buf = c.body.buffer();
+    let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+    let Some(swapped) = swap_signature(&text, &c.quote, old.as_deref(), new.as_deref()) else { return };
+    let cursor = buf.cursor_position();
+    buf.set_text(&swapped);
+    buf.place_cursor(&buf.iter_at_offset(cursor.min(swapped.chars().count() as i32)));
+    let initial = swap_signature(&c.initial_text.borrow(), &c.quote, old.as_deref(), new.as_deref());
+    if let Some(initial) = initial {
+        *c.initial_text.borrow_mut() = initial;
+    }
+    *current.borrow_mut() = new;
+}
+
 fn changed(c: &Rc<Compose>) {
     c.edited.set(true);
     c.dirty.set(true);
@@ -803,7 +853,7 @@ fn has_content(c: &Compose) -> bool {
     let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
     [&c.to, &c.cc, &c.bcc, &c.subject].iter().any(|e| !e.text().trim().is_empty())
         || !c.attachments.borrow().is_empty()
-        || text.as_str() != c.initial_text
+        || text.as_str() != *c.initial_text.borrow()
 }
 
 /// The message as it stands. Strict: `None` if an address field doesn't parse; lenient:
@@ -942,7 +992,7 @@ pub fn send_released(key: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mailto_draft, percent_decode, with_signature};
+    use super::{mailto_draft, percent_decode, swap_signature, with_signature};
 
     fn emails(a: &[tern_core::model::Address]) -> Vec<&str> {
         a.iter().map(|a| a.email.as_str()).collect()
@@ -991,6 +1041,20 @@ mod tests {
     fn header_fields_cannot_inject_lines() {
         let d = mailto_draft("mailto:x@y.org?subject=Hi%0D%0ABcc:%20spy@z.org");
         assert!(!d.subject.contains('\n') && !d.subject.contains('\r'));
+    }
+
+    #[test]
+    fn changing_from_swaps_the_signature() {
+        let quote = "\n\nOn Monday Ann wrote:\n> hi";
+        let reply = format!("Thanks!\n\n-- \nTom (iCloud){quote}");
+        assert_eq!(
+            swap_signature(&reply, quote, Some("Tom (iCloud)"), Some("Tom\nGmail")).as_deref(),
+            Some(format!("Thanks!\n\n-- \nTom\nGmail{quote}").as_str())
+        );
+        assert_eq!(swap_signature(&reply, quote, Some("Tom (iCloud)"), None).as_deref(), Some(format!("Thanks!{quote}").as_str()), "to an account without one");
+        assert_eq!(swap_signature(&format!("Thanks!{quote}"), quote, None, Some("Tom")).as_deref(), Some(format!("Thanks!\n\n-- \nTom{quote}").as_str()), "from an account without one");
+        assert_eq!(swap_signature("Hi", "", None, Some("Tom")).as_deref(), Some("Hi\n\n-- \nTom"), "new message");
+        assert_eq!(swap_signature("Hi\n\n-- \nTom R.", "", Some("Tom"), Some("Ann")), None, "edited by hand: left alone");
     }
 
     #[test]

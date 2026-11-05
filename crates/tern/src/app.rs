@@ -482,6 +482,7 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("previous-message", Box::new(|ui| crate::message_list::step(ui, -1)));
     simple("add-account", Box::new(accounts::open));
     simple("unsent", Box::new(crate::outbox::open));
+    simple("preferences", Box::new(crate::prefs::open));
     simple("toggle-sidebar", Box::new(|ui| ui.outer.set_show_sidebar(!ui.outer.shows_sidebar())));
     simple("goto-inbox", Box::new(|ui| ui.sidebar.select_scope(ui, &ListScope::Role(MailboxRole::Inbox))));
     simple("about", Box::new(|ui| {
@@ -558,6 +559,7 @@ fn install_actions(ui: &Rc<Ui>) {
     // message list so they never fire while typing in a text field.
     let accels: &[(&str, &[&str])] = &[
         ("win.compose", &["<Control>n"]),
+        ("win.preferences", &["<Control>comma"]),
         ("win.reply", &["<Control>r"]),
         ("win.reply-all", &["<Control><Shift>r"]),
         ("win.forward", &["<Control><Shift>f"]),
