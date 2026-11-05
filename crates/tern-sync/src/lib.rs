@@ -192,6 +192,8 @@ pub enum Command {
     ReorderAccounts(Vec<AccountId>),
     /// An account's signature (`None` = no signature), saved to accounts.toml.
     SetSignature(AccountId, Option<String>),
+    /// An account's sidebar label and the name on mail it sends, saved to accounts.toml.
+    SetAccountNames { account: AccountId, description: String, name: Option<String> },
     Shutdown,
 }
 
@@ -699,6 +701,9 @@ impl Engine {
             Command::AddAccount(cfg) => self.add_account(*cfg),
             Command::ReorderAccounts(order) => self.reorder_accounts(&order),
             Command::SetSignature(id, signature) => self.set_signature(id, signature),
+            Command::SetAccountNames { account, description, name } => {
+                self.set_account_names(account, description, name)
+            }
             Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),
             Command::Shutdown => {}
@@ -1223,6 +1228,25 @@ impl Engine {
             let mut file = paths.load_accounts().unwrap_or_default();
             let Some(a) = file.accounts.iter_mut().find(|a| a.id == id) else { return };
             a.signature = signature;
+            if let Err(e) = paths.save_accounts(&file) {
+                return self.fail(Some(id), e);
+            }
+        }
+        self.emit(Event::AccountsChanged);
+    }
+
+    fn set_account_names(&mut self, id: AccountId, description: String, name: Option<String>) {
+        let apply = |cfg: &mut AccountConfig| {
+            cfg.description = description.clone();
+            cfg.identity.name = name.clone();
+        };
+        if let Some(a) = self.accounts.get_mut(&id) {
+            apply(&mut a.cfg);
+        }
+        if let Some(paths) = &self.paths {
+            let mut file = paths.load_accounts().unwrap_or_default();
+            let Some(a) = file.accounts.iter_mut().find(|a| a.id == id) else { return };
+            apply(a);
             if let Err(e) = paths.save_accounts(&file) {
                 return self.fail(Some(id), e);
             }

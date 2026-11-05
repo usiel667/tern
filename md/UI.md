@@ -65,8 +65,12 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
   layout: accounts on the left, the chosen account's signature on the right under an "Add a
   signature" switch (picked from three side-by-side layouts: two columns + the switch from the
   subpage one). Saves 0.5 s after typing stops and on close, to accounts.toml. Changing From
-  in New Message swaps in that account's signature (left alone if edited by hand). Next pages:
-  Accounts (Remove Account), Viewing, General.
+  in New Message swaps in that account's signature (left alone if edited by hand).
+- **2026-11-04 — Settings → Accounts (first tab):** same two columns. Description and Full Name
+  editable (Enter / ✓ saves; sidebar and sent mail follow), email and type shown, Sign In
+  Again…, Remove Account… (red, asks first: mail stays on the server; Tern's copy, password and
+  unsent changes go), Add Account… under the list. Red buttons get dark text in Tokyo Night.
+  Next pages: Viewing, General.
 
 - **2026-11-04 — Dark HTML mail:** in dark mode HTML mail is darkened in Tokyo Night colours
   (white → window `#1a1b26`, black → text `#c0caf5`, hues kept, pictures in their own colours

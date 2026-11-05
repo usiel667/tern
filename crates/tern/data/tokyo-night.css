@@ -103,3 +103,6 @@ scrollbar.overlay-indicator.horizontal > range > trough > slider {
 scrollbar.overlay-indicator.horizontal:not(.dragging):not(.hovering) > range > trough > slider {
   min-height: 4px; min-width: 24px; border: 2px solid transparent; margin: 8px 0 0 0;
 }
+
+/* Red buttons (Remove Account…): red with dark text, like the purple Send button. */
+button.destructive-action { background-color: #ff757f; background-image: none; color: #1a1b26; }

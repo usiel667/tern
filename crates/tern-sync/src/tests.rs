@@ -1137,3 +1137,24 @@ async fn set_signature_saves_it_to_the_accounts_file() {
     assert_eq!(paths.load_accounts().unwrap().accounts[0].signature, None);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn set_account_names_saves_them_and_new_drafts_use_the_name() {
+    let dir = std::env::temp_dir().join(format!("tern-names-{}", uuid::Uuid::new_v4()));
+    let paths = crate::config::Paths::in_dir(&dir);
+    let cfg = tern_core::account::AccountConfig::preset(Provider::ICloud, "Tom", "tom@icloud.com");
+    paths.save_accounts(&tern_core::account::AccountsFile { accounts: vec![cfg.clone()] }).unwrap();
+    let (tx, rx) = async_channel::unbounded();
+    let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.paths = Some(paths.clone());
+    engine.add(cfg.clone(), Arc::new(Fake::default()));
+
+    engine.handle(Command::SetAccountNames { account: cfg.id, description: "Personal".into(), name: Some("Tom R.".into()) });
+    let saved = &paths.load_accounts().unwrap().accounts[0];
+    assert_eq!(saved.description, "Personal");
+    assert_eq!(saved.identity.name.as_deref(), Some("Tom R."));
+    assert_eq!(saved.identity.email, "tom@icloud.com", "address unchanged");
+    assert_eq!(engine.accounts[&cfg.id].cfg.identity.name.as_deref(), Some("Tom R."), "the running account too");
+    assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, Event::AccountsChanged)));
+    std::fs::remove_dir_all(dir).unwrap();
+}
