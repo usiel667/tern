@@ -16,6 +16,9 @@ pub struct Settings {
     pub list_width: Option<u32>,
     /// Vim keys across the main window: h/l between panes, j/k, gg/G, Ctrl+D/U, dd, u undo.
     pub vim_keys: bool,
+    /// Shortcuts changed in Settings → Keyboard, by id (`keys::SHORTCUTS`); the rest keep
+    /// their defaults.
+    pub keys: crate::keys::Overrides,
 }
 
 impl Default for Settings {
@@ -27,6 +30,7 @@ impl Default for Settings {
             mailboxes_width: None,
             list_width: None,
             vim_keys: false,
+            keys: Default::default(),
         }
     }
 }

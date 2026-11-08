@@ -7,6 +7,7 @@ pub mod account;
 pub mod backend;
 pub mod compose;
 pub mod error;
+pub mod keys;
 pub mod mime;
 pub mod model;
 pub mod search;

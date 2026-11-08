@@ -602,32 +602,9 @@ fn install_actions(ui: &Rc<Ui>) {
     }
     app.add_action(&quit);
 
-    // Apple Mail shortcuts with ⌘ → Ctrl. Single keys (Delete, j/k) live on the
-    // message list so they never fire while typing in a text field.
-    let accels: &[(&str, &[&str])] = &[
-        ("win.compose", &["<Control>n"]),
-        ("win.preferences", &["<Control>comma"]),
-        ("win.zoom-in", &["<Control>equal", "<Control>plus", "<Control>KP_Add"]),
-        ("win.zoom-out", &["<Control>minus", "<Control>KP_Subtract"]),
-        ("win.zoom-reset", &["<Control>0", "<Control>KP_0"]),
-        ("win.reply", &["<Control>r"]),
-        ("win.reply-all", &["<Control><Shift>r"]),
-        ("win.forward", &["<Control><Shift>f"]),
-        ("win.get-mail", &["<Control><Shift>n"]),
-        ("win.toggle-read", &["<Control><Shift>u"]),
-        ("win.toggle-flag", &["<Control><Shift>l"]),
-        ("win.junk", &["<Control><Shift>j"]),
-        ("win.archive", &["<Control><Alt>a"]),
-        ("win.delete", &["<Control>BackSpace"]),
-        ("win.undo", &["<Control>z"]),
-        ("win.search", &["<Control>f", "<Control><Alt>f"]),
-        ("win.goto-inbox", &["<Control>1"]),
-        ("win.toggle-sidebar", &["<Control><Shift>m"]),
-        ("app.quit", &["<Control>q"]),
-    ];
-    for (action, keys) in accels {
-        app.set_accels_for_action(action, keys);
-    }
+    // Apple Mail shortcuts with ⌘ → Ctrl, or as changed in Settings → Keyboard. Single keys
+    // (Delete, j/k) live on the message list so they never fire while typing in a text field.
+    crate::shortcuts::apply_app_accels(ui);
 }
 
 /// The main window's three toolbars (Mailboxes, message list, message) are kept the same

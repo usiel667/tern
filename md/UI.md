@@ -23,6 +23,16 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Decisions
 
+- **2026-11-07 — Custom shortcuts (Settings → Keyboard):** every shortcut is listed and
+  changeable: Everywhere (Ctrl/Alt/Super required, since they fire while typing), New
+  Message, Message List single keys, and Vim keys (one key or two in a row). Click a row,
+  press the key; it warns when a key is taken ("Set moves it here"), Turn Off, a reset arrow
+  per changed row, Reset All. Alternatives read "L or O", pairs "g g". App shortcuts are
+  switched off while the capture dialog is open (else Ctrl+Q would quit). Table and rules in
+  `tern_core::keys`, only changes saved (`[keys]` in settings.toml). The Vim switch moved
+  here from General (the page is now Keyboard). Suggested buttons in dialogs got the purple
+  Send look (they were unreadable in Tokyo Night).
+
 - **2026-11-07 — Vim keys (Settings → General, off by default):** h / l move between
   Mailboxes, the message list and the open message; j / k, gg / G and Ctrl+D / Ctrl+U move
   inside the focused pane (mailboxes, messages, or scroll the message); / search, u undo

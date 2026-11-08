@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use adw::prelude::*;
-use gtk::{gdk, glib};
+use gtk::glib;
 
 use crate::app::Ui;
 use crate::viewer::Scroll;
@@ -43,46 +43,58 @@ pub enum Outcome {
     Pass,
 }
 
-/// Turns key presses into commands; `g` and `d` wait for a second key (gg, dd).
+/// Turns key presses into commands. A key that starts a two-key binding (g of gg, d of dd)
+/// waits for the next one.
 #[derive(Debug, Default)]
 pub struct Keys {
-    pending: Option<(char, Instant)>,
+    pending: Option<(String, Instant)>,
 }
 
 impl Keys {
-    pub fn feed(&mut self, c: char, ctrl: bool, now: Instant) -> Outcome {
+    /// `table`: every Vim binding (normalized accelerator names, "g g" for a pair) and its
+    /// shortcut id, from `shortcuts::table`.
+    pub fn feed(&mut self, stroke: &str, table: &[(String, &'static str)], now: Instant) -> Outcome {
         let pending = self.pending.take().filter(|(_, at)| now.duration_since(*at) < SEQUENCE_TIMEOUT).map(|(p, _)| p);
-        if ctrl {
-            return match c {
-                'd' => Outcome::Run(Cmd::HalfDown),
-                'u' => Outcome::Run(Cmd::HalfUp),
-                _ => Outcome::Pass,
-            };
-        }
-        let cmd = match (pending, c) {
-            (Some('g'), 'g') => Cmd::Top,
-            (Some('d'), 'd') => Cmd::Action("delete"),
-            (_, 'g' | 'd') => {
-                self.pending = Some((c, now));
-                return Outcome::Wait;
+        if let Some(first) = pending {
+            let pair = format!("{first} {stroke}");
+            if let Some((_, id)) = table.iter().find(|(b, _)| *b == pair) {
+                return command(id).map_or(Outcome::Pass, Outcome::Run);
             }
-            (_, 'h') => Cmd::Left,
-            (_, 'l' | 'o') => Cmd::Right,
-            (_, 'j') => Cmd::Down,
-            (_, 'k') => Cmd::Up,
-            (_, 'G') => Cmd::Bottom,
-            (_, '/') => Cmd::Action("search"),
-            (_, 'u') => Cmd::Action("undo"),
-            (_, 'U') => Cmd::Action("toggle-read"),
-            (_, 'r') => Cmd::Action("reply"),
-            (_, 'a') => Cmd::Action("reply-all"),
-            (_, 'f') => Cmd::Action("forward"),
-            (_, 'e') => Cmd::Action("archive"),
-            (_, 's') => Cmd::Action("toggle-flag"),
-            _ => return Outcome::Pass,
-        };
-        Outcome::Run(cmd)
+        }
+        let starts_pair = format!("{stroke} ");
+        if table.iter().any(|(b, _)| b.starts_with(&starts_pair)) {
+            self.pending = Some((stroke.to_string(), now));
+            return Outcome::Wait;
+        }
+        match table.iter().find(|(b, _)| b == stroke) {
+            Some((_, id)) => command(id).map_or(Outcome::Pass, Outcome::Run),
+            None => Outcome::Pass,
+        }
     }
+}
+
+/// What a Vim shortcut (`tern_core::keys`, id `vim.*`) does.
+fn command(id: &str) -> Option<Cmd> {
+    Some(match id {
+        "vim.left" => Cmd::Left,
+        "vim.right" => Cmd::Right,
+        "vim.down" => Cmd::Down,
+        "vim.up" => Cmd::Up,
+        "vim.top" => Cmd::Top,
+        "vim.bottom" => Cmd::Bottom,
+        "vim.half-down" => Cmd::HalfDown,
+        "vim.half-up" => Cmd::HalfUp,
+        "vim.search" => Cmd::Action("search"),
+        "vim.undo" => Cmd::Action("undo"),
+        "vim.toggle-read" => Cmd::Action("toggle-read"),
+        "vim.delete" => Cmd::Action("delete"),
+        "vim.reply" => Cmd::Action("reply"),
+        "vim.reply-all" => Cmd::Action("reply-all"),
+        "vim.forward" => Cmd::Action("forward"),
+        "vim.archive" => Cmd::Action("archive"),
+        "vim.toggle-flag" => Cmd::Action("toggle-flag"),
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,16 +174,16 @@ pub fn connect(ui: &Rc<Ui>) {
     let weak = Rc::downgrade(ui);
     keys.connect_key_pressed(move |_, key, _, mods| {
         let Some(ui) = weak.upgrade() else { return glib::Propagation::Proceed };
-        if !ui.settings.borrow().vim_keys || mods.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SUPER_MASK) {
+        if !ui.settings.borrow().vim_keys {
             return glib::Propagation::Proceed;
         }
         let focus = gtk::prelude::GtkWindowExt::focus(&ui.window);
         if busy(&ui, focus.as_ref()) {
             return glib::Propagation::Proceed;
         }
-        let Some(c) = key.to_unicode() else { return glib::Propagation::Proceed };
-        let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
-        match state.borrow_mut().feed(c, ctrl, Instant::now()) {
+        let Some(stroke) = crate::shortcuts::stroke(key, mods) else { return glib::Propagation::Proceed };
+        let table = crate::shortcuts::table(&ui, tern_core::keys::Group::Vim);
+        match state.borrow_mut().feed(&stroke, &table, Instant::now()) {
             Outcome::Pass => glib::Propagation::Proceed,
             Outcome::Wait => glib::Propagation::Stop,
             Outcome::Run(cmd) => {
@@ -186,35 +198,58 @@ pub fn connect(ui: &Rc<Ui>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tern_core::keys::{self, Group, Overrides};
 
-    fn feed(keys: &mut Keys, text: &str, start: Instant) -> Vec<Outcome> {
-        text.chars().map(|c| keys.feed(c, false, start)).collect()
+    fn table(o: &Overrides) -> Vec<(String, &'static str)> {
+        keys::SHORTCUTS
+            .iter()
+            .filter(|s| s.group == Group::Vim)
+            .flat_map(|s| keys::bindings(s, o).into_iter().map(move |b| (b, s.id)))
+            .collect()
+    }
+
+    fn feed(k: &mut Keys, strokes: &[&str], t: &[(String, &'static str)], at: Instant) -> Vec<Outcome> {
+        strokes.iter().map(|s| k.feed(s, t, at)).collect()
     }
 
     #[test]
-    fn pairs_and_singles() {
-        let t = Instant::now();
+    fn default_keys() {
+        let (t, now) = (table(&Overrides::new()), Instant::now());
         let mut k = Keys::default();
-        assert_eq!(feed(&mut k, "gg", t), [Outcome::Wait, Outcome::Run(Cmd::Top)]);
-        assert_eq!(feed(&mut k, "dd", t), [Outcome::Wait, Outcome::Run(Cmd::Action("delete"))]);
-        assert_eq!(feed(&mut k, "G", t), [Outcome::Run(Cmd::Bottom)]);
-        assert_eq!(feed(&mut k, "u", t), [Outcome::Run(Cmd::Action("undo"))]);
-        assert_eq!(feed(&mut k, "U", t), [Outcome::Run(Cmd::Action("toggle-read"))]);
-        assert_eq!(feed(&mut k, "x", t), [Outcome::Pass]);
-        assert_eq!(k.feed('d', true, t), Outcome::Run(Cmd::HalfDown));
-        assert_eq!(k.feed('u', true, t), Outcome::Run(Cmd::HalfUp));
-        assert_eq!(k.feed('r', true, t), Outcome::Pass, "Ctrl+R stays the app's reply");
+        assert_eq!(feed(&mut k, &["g", "g"], &t, now), [Outcome::Wait, Outcome::Run(Cmd::Top)]);
+        assert_eq!(feed(&mut k, &["d", "d"], &t, now), [Outcome::Wait, Outcome::Run(Cmd::Action("delete"))]);
+        assert_eq!(feed(&mut k, &["<Shift>g"], &t, now), [Outcome::Run(Cmd::Bottom)]);
+        assert_eq!(feed(&mut k, &["u"], &t, now), [Outcome::Run(Cmd::Action("undo"))]);
+        assert_eq!(feed(&mut k, &["<Shift>u"], &t, now), [Outcome::Run(Cmd::Action("toggle-read"))]);
+        assert_eq!(feed(&mut k, &["x"], &t, now), [Outcome::Pass]);
+        assert_eq!(feed(&mut k, &["<Control>d", "<Control>u"], &t, now), [Outcome::Run(Cmd::HalfDown), Outcome::Run(Cmd::HalfUp)]);
+        assert_eq!(feed(&mut k, &["<Control>r"], &t, now), [Outcome::Pass], "Ctrl+R stays the app's reply");
     }
 
     #[test]
     fn a_pair_needs_both_keys_in_time_and_in_order() {
-        let t = Instant::now();
+        let (t, now) = (table(&Overrides::new()), Instant::now());
         let mut k = Keys::default();
-        assert_eq!(k.feed('g', false, t), Outcome::Wait);
-        assert_eq!(k.feed('g', false, t + SEQUENCE_TIMEOUT), Outcome::Wait, "too late: starts over");
-        assert_eq!(k.feed('j', false, t + SEQUENCE_TIMEOUT), Outcome::Run(Cmd::Down), "a different key cancels");
-        assert_eq!(k.feed('g', false, t), Outcome::Wait);
-        assert_eq!(k.feed('d', false, t), Outcome::Wait, "gd isn't a command; d now waits");
-        assert_eq!(k.feed('d', false, t), Outcome::Run(Cmd::Action("delete")));
+        assert_eq!(k.feed("g", &t, now), Outcome::Wait);
+        assert_eq!(k.feed("g", &t, now + SEQUENCE_TIMEOUT), Outcome::Wait, "too late: starts over");
+        assert_eq!(k.feed("j", &t, now + SEQUENCE_TIMEOUT), Outcome::Run(Cmd::Down), "a different key cancels");
+        assert_eq!(k.feed("g", &t, now), Outcome::Wait);
+        assert_eq!(k.feed("d", &t, now), Outcome::Wait, "gd isn't bound; d now waits");
+        assert_eq!(k.feed("d", &t, now), Outcome::Run(Cmd::Action("delete")));
+    }
+
+    #[test]
+    fn changed_keys_take_over() {
+        let mut o = Overrides::new();
+        o.insert("vim.down".into(), vec!["n".into()]);
+        o.insert("vim.top".into(), vec!["<Shift>k".into()]);
+        o.insert("vim.delete".into(), vec!["x".into()]);
+        let (t, now) = (table(&o), Instant::now());
+        let mut k = Keys::default();
+        assert_eq!(k.feed("n", &t, now), Outcome::Run(Cmd::Down));
+        assert_eq!(k.feed("j", &t, now), Outcome::Pass, "old key freed");
+        assert_eq!(k.feed("g", &t, now), Outcome::Pass, "gg gone, so g doesn't wait");
+        assert_eq!(k.feed("<Shift>k", &t, now), Outcome::Run(Cmd::Top));
+        assert_eq!(k.feed("x", &t, now), Outcome::Run(Cmd::Action("delete")));
     }
 }

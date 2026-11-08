@@ -675,21 +675,14 @@ pub fn connect(ui: &Rc<Ui>) {
         let weak = Rc::downgrade(ui);
         keys.connect_key_pressed(move |_, key, _, mods| {
             let Some(ui) = weak.upgrade() else { return glib::Propagation::Proceed };
-            if mods.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+            let Some(stroke) = crate::shortcuts::stroke(key, mods) else { return glib::Propagation::Proceed };
+            let Some(id) = crate::shortcuts::lookup(&ui, tern_core::keys::Group::MessageList, &stroke) else {
                 return glib::Propagation::Proceed;
-            }
-            let action = match key {
-                gdk::Key::Delete | gdk::Key::BackSpace => "delete",
-                gdk::Key::j => "next-message",
-                gdk::Key::k => "previous-message",
-                gdk::Key::slash => "search",
-                gdk::Key::r => "reply",
-                gdk::Key::a => "reply-all",
-                gdk::Key::f => "forward",
-                gdk::Key::e => "archive",
-                gdk::Key::u => "toggle-read",
-                gdk::Key::s => "toggle-flag",
-                _ => return glib::Propagation::Proceed,
+            };
+            let action = match id {
+                "list.next" => "next-message",
+                "list.previous" => "previous-message",
+                other => other.trim_start_matches("list."),
             };
             let _ = WidgetExt::activate_action(&ui.window, &format!("win.{action}"), None);
             glib::Propagation::Stop

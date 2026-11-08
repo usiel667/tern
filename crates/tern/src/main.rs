@@ -15,6 +15,8 @@ mod format;
 mod message_list;
 mod outbox;
 mod prefs;
+mod prefs_keys;
+mod shortcuts;
 mod sidebar;
 mod viewer;
 mod vim;

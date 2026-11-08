@@ -90,7 +90,9 @@ mod tests {
         assert_eq!(p.load_accounts().unwrap(), file);
 
         assert_eq!(p.load_settings(), Settings::default(), "no file yet");
-        let s = Settings { load_remote_content: true, darken_html: false, zoom_percent: 125, mailboxes_width: Some(240), list_width: None, vim_keys: true };
+        let mut s = Settings { load_remote_content: true, darken_html: false, zoom_percent: 125, mailboxes_width: Some(240), list_width: None, vim_keys: true, ..Settings::default() };
+        s.keys.insert("win.reply".into(), vec!["<Control>e".into()]);
+        s.keys.insert("vim.top".into(), vec![]);
         p.save_settings(&s).unwrap();
         assert_eq!(p.load_settings(), s);
         std::fs::remove_dir_all(dir).unwrap();

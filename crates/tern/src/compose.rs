@@ -541,7 +541,8 @@ fn open(
         });
     }
     c.window.add_controller(keys);
-    // Ctrl+Return sends and Shift+Ctrl+A attaches (Apple Mail's ⇧⌘A). Capture phase: the
+    // Send (Ctrl+Return), Save (Ctrl+S) and Attach (Shift+Ctrl+A, Apple Mail's ⇧⌘A), or as
+    // changed in Settings → Keyboard. Capture phase: the
     // body inserts a line break for Ctrl+Return and text fields bind Shift+Ctrl+A to
     // "unselect all", so both would be swallowed before a bubble-phase handler.
     let attach_key = gtk::EventControllerKey::new();
@@ -549,25 +550,17 @@ fn open(
     {
         let (c2, ui2) = (c.clone(), ui.clone());
         attach_key.connect_key_pressed(move |_, key, _, mods| {
-            if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter) && mods.contains(gdk::ModifierType::CONTROL_MASK) {
-                do_send(&ui2, &c2);
-                return glib::Propagation::Stop;
+            let Some(stroke) = crate::shortcuts::stroke(key, mods) else { return glib::Propagation::Proceed };
+            match crate::shortcuts::lookup(&ui2, tern_core::keys::Group::NewMessage, &stroke) {
+                Some("compose.send") => do_send(&ui2, &c2),
+                Some("compose.save") => {
+                    save_now(&c2);
+                    c2.toasts.add_toast(adw::Toast::new("Saved to Drafts"));
+                }
+                Some("compose.attach") => pick_files(&c2),
+                _ => return glib::Propagation::Proceed,
             }
-            if matches!(key, gdk::Key::s | gdk::Key::S)
-                && mods.contains(gdk::ModifierType::CONTROL_MASK)
-                && !mods.contains(gdk::ModifierType::SHIFT_MASK)
-            {
-                save_now(&c2);
-                c2.toasts.add_toast(adw::Toast::new("Saved to Drafts"));
-                return glib::Propagation::Stop;
-            }
-            if matches!(key, gdk::Key::A | gdk::Key::a)
-                && mods.contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
-            {
-                pick_files(&c2);
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
+            glib::Propagation::Stop
         });
     }
     c.window.add_controller(attach_key);
