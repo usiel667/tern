@@ -14,6 +14,15 @@ use webkit::prelude::*;
 use crate::app::Ui;
 use crate::format::{full_date, human_size, render_body};
 
+/// How far `Viewer::scroll` moves the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scroll {
+    Lines(i32),
+    HalfPages(i32),
+    Top,
+    Bottom,
+}
+
 pub struct Viewer {
     pub root: adw::ToolbarView,
     stack: gtk::Stack,
@@ -127,8 +136,12 @@ impl Viewer {
 
         let webview = webkit::WebView::new();
         if let Some(settings) = WebViewExt::settings(&webview) {
-            // Mail never runs scripts. Remote loads are governed by CSP (format.rs).
-            settings.set_enable_javascript(false);
+            // Mail never runs scripts: markup off strips <script>, on* attributes and the
+            // like while parsing, and the CSP (format.rs) allows no script at all. Scripting
+            // itself stays on only so Tern can scroll the view (`Viewer::scroll`). Checked
+            // 2026-11-07 with inline/onerror/svg/iframe/meta-refresh/javascript:-link/form probes.
+            // Remote loads are governed by the CSP too.
+            settings.set_enable_javascript(true);
             settings.set_enable_javascript_markup(false);
             settings.set_enable_developer_extras(cfg!(debug_assertions));
         }
@@ -200,6 +213,29 @@ impl Viewer {
         {
             self.render(ui, id, &b);
         }
+    }
+
+    /// Scroll the open message (Vim keys). Runs a line of Tern's own script in the view:
+    /// scripting is on for that alone; the message's scripts are stripped
+    /// (`enable_javascript_markup` off) and its CSP allows none.
+    pub fn scroll(&self, by: Scroll) {
+        let js = match by {
+            Scroll::Lines(n) => format!("window.scrollBy(0, {})", n * 60),
+            Scroll::HalfPages(n) => format!("window.scrollBy(0, {n} * window.innerHeight / 2)"),
+            Scroll::Top => "window.scrollTo(0, 0)".to_string(),
+            Scroll::Bottom => "window.scrollTo(0, document.scrollingElement.scrollHeight)".to_string(),
+        };
+        self.webview.evaluate_javascript(&js, None, None, None::<&gtk::gio::Cancellable>, |_| {});
+    }
+
+    /// Put the keyboard focus on the open message.
+    pub fn focus(&self) {
+        self.webview.grab_focus();
+    }
+
+    /// Whether `w` is (in) the message view.
+    pub fn contains(&self, w: &gtk::Widget) -> bool {
+        w == self.webview.upcast_ref::<gtk::Widget>() || w.is_ancestor(&self.webview)
     }
 
     pub fn current(&self) -> Option<MessageId> {

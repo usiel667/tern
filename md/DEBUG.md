@@ -21,6 +21,22 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-07 — Moving around with Vim keys was slow (mailbox switch ~0.45 s)
+
+**Saw:** j/k in Mailboxes lagged; quick presses queued and then landed at once (video: Drafts
+→ iCloud Inbox in one 83 ms frame). Probe: keys waited up to 655 ms, key → frame up to 2.1 s.
+
+**Not it:** SQL. `Store::list` on the owner's database: ≤ 49 ms for every mailbox
+(conversations on), the mailbox-count query 8 ms. The slow-step log didn't show it because
+`set_scope`'s reload wasn't timed (it is now: "mailbox switch").
+
+**Cause:** a new list makes GTK build a fresh row widget per message (setups = rows, no reuse
+on a full splice), and each row built its own right-click `PopoverMenu` (~1 ms). 500 rows ≈
+0.45 s per mailbox switch.
+
+**Fix:** build a row's menu on its first right-click. Demo 50-row switch 65–75 ms → 11 ms;
+owner's Tern: full reloads median 55 ms (max 95), key → frame median 41 ms, no queueing.
+
 ## 2026-11-07 — Some marketing mail stayed white in dark mode
 
 **Saw:** in dark mode a TikTok and a Sur La Table email showed light backgrounds, with no

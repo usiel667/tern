@@ -1,4 +1,4 @@
-//! Settings window (Ctrl+,). Pages so far: Accounts, Viewing, Signatures.
+//! Settings window (Ctrl+,). Pages so far: General, Accounts, Viewing, Signatures.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,6 +17,7 @@ const SAVE_DELAY: Duration = Duration::from_millis(500);
 
 pub fn open(ui: &Rc<Ui>) {
     let dialog = adw::PreferencesDialog::builder().title("Settings").build();
+    dialog.add(&general_page(ui));
     dialog.add(&accounts_page(ui, &dialog));
     dialog.add(&viewing_page(ui));
     dialog.add(&signatures_page(ui, &dialog));
@@ -141,6 +142,29 @@ fn accounts_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) -> adw::Preferenc
     });
     group.add(&columns);
     page.add(&group);
+    page
+}
+
+/// App-wide switches that fit nowhere else. Each takes effect at once.
+fn general_page(ui: &Rc<Ui>) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder().title("General").icon_name("preferences-system-symbolic").build();
+    let keyboard = adw::PreferencesGroup::builder().title("Keyboard").build();
+    let vim = adw::SwitchRow::builder()
+        .title("Vim keys")
+        .subtitle(
+            "h / l move between Mailboxes, messages and the open message; j / k, gg / G and \
+             Ctrl+D / Ctrl+U move inside it. / searches, u undoes, U marks read or unread, dd deletes.",
+        )
+        .active(ui.settings.borrow().vim_keys)
+        .build();
+    keyboard.add(&vim);
+    page.add(&keyboard);
+    let ui = ui.clone();
+    vim.connect_active_notify(move |row| {
+        ui.settings.borrow_mut().vim_keys = row.is_active();
+        let s = ui.settings.borrow().clone();
+        ui.send(Command::SaveSettings(s));
+    });
     page
 }
 

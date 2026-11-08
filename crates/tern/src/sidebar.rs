@@ -163,6 +163,46 @@ impl Sidebar {
         }
     }
 
+    /// The mailbox `delta` rows down (up if negative) from the selected one, or the first /
+    /// last one when `delta` is `i32::MIN` / `i32::MAX`; it opens and takes the focus (Vim keys).
+    pub fn step(&self, delta: i32) {
+        let rows: Vec<gtk::ListBoxRow> = self
+            .rows
+            .borrow()
+            .iter()
+            .filter(|(r, s)| s.is_some() && r.is_visible() && r.is_child_visible())
+            .map(|(r, _)| r.clone())
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let cur = self.listbox.selected_row().and_then(|sel| rows.iter().position(|r| *r == sel));
+        let last = rows.len() as i64 - 1;
+        let next = match (delta, cur) {
+            (i32::MIN, _) => 0,
+            (i32::MAX, _) => last,
+            (d, Some(c)) => (c as i64 + d as i64).clamp(0, last),
+            (_, None) => 0,
+        } as usize;
+        self.listbox.select_row(Some(&rows[next]));
+        rows[next].grab_focus();
+    }
+
+    /// Put the keyboard focus on the selected mailbox.
+    pub fn focus(&self) {
+        match self.listbox.selected_row() {
+            Some(row) => {
+                row.grab_focus();
+            }
+            None => self.step(0),
+        }
+    }
+
+    /// Whether `w` is in the mailbox list.
+    pub fn contains(&self, w: &gtk::Widget) -> bool {
+        w.is_ancestor(&self.listbox) || w == self.listbox.upcast_ref::<gtk::Widget>()
+    }
+
     fn section(&self, title: &str) {
         let label = gtk::Label::builder()
             .label(title)

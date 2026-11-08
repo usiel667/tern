@@ -17,6 +17,7 @@ mod outbox;
 mod prefs;
 mod sidebar;
 mod viewer;
+mod vim;
 
 use std::cell::RefCell;
 use std::rc::Rc;

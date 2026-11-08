@@ -216,6 +216,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
     connect_resize_handle(&ui, &mailboxes_handle, &mailboxes_column, Column::Mailboxes);
     connect_resize_handle(&ui, &list_handle, &list_column, Column::List);
     crate::viewer::connect(&ui);
+    crate::vim::connect(&ui);
     install_actions(&ui);
     spawn_event_loop(&ui);
 
@@ -323,7 +324,7 @@ impl Ui {
         *self.scope_title.borrow_mut() = title.to_string();
         self.list.selection.unselect_all();
         self.list.reset_paging();
-        self.reload_list();
+        timed("mailbox switch", || self.reload_list());
         self.viewer.clear();
         if let ListScope::Mailbox(id) = scope {
             self.send(Command::SyncMailbox(id));
@@ -774,7 +775,7 @@ fn move_selected(ui: &Rc<Ui>, target: MoveTarget) {
 }
 
 /// The text field (entry or text view) being typed in, if any.
-fn editing_text(ui: &Ui) -> Option<gtk::Widget> {
+pub fn editing_text(ui: &Ui) -> Option<gtk::Widget> {
     gtk::prelude::GtkWindowExt::focus(&ui.window).filter(|w| w.is::<gtk::Text>() || w.is::<gtk::TextView>())
 }
 

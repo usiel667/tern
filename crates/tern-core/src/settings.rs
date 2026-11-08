@@ -14,11 +14,20 @@ pub struct Settings {
     /// Widths the Mailboxes and message-list columns were dragged to, in pixels (unset: automatic).
     pub mailboxes_width: Option<u32>,
     pub list_width: Option<u32>,
+    /// Vim keys across the main window: h/l between panes, j/k, gg/G, Ctrl+D/U, dd, u undo.
+    pub vim_keys: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { load_remote_content: false, darken_html: true, zoom_percent: 100, mailboxes_width: None, list_width: None }
+        Self {
+            load_remote_content: false,
+            darken_html: true,
+            zoom_percent: 100,
+            mailboxes_width: None,
+            list_width: None,
+            vim_keys: false,
+        }
     }
 }
 

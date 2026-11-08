@@ -9,9 +9,6 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## To do
 
-- **Vim key bindings (Settings toggle)** — owner wants to move around the whole app with Vim
-  keys once the core features are done: j/k through messages, h/l between sidebar / list /
-  message, gg/G, / for search, and so on. Must never fire while typing in a text field.
 - **Themes (Settings)** — pick a theme in Preferences, not just follow the system. The usual
   suspects: Tokyo Night (Night/Storm/Moon/Day), Catppuccin (Mocha/Macchiato/Frappé/Latte),
   Rosé Pine (Main/Moon/Dawn), plus probably Gruvbox, Nord, Dracula, Everforest, Kanagawa.
@@ -25,6 +22,16 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 -
 
 ## Decisions
+
+- **2026-11-07 — Vim keys (Settings → General, off by default):** h / l move between
+  Mailboxes, the message list and the open message; j / k, gg / G and Ctrl+D / Ctrl+U move
+  inside the focused pane (mailboxes, messages, or scroll the message); / search, u undo
+  (owner's pick over read/unread), U read/unread, dd delete, and r a f e s from any pane.
+  Handled on the main window in the capture phase (`vim.rs`), so it works while WebKit has
+  the focus; never while typing in a field or with a dialog/menu open. Scrolling the message
+  needed scripting on in the web view for Tern's own commands (owner approved): mail scripts
+  stay stripped (`enable_javascript_markup` off) and CSP-blocked — probed with inline,
+  onerror, svg onload, iframe srcdoc, meta refresh, javascript: link and form; none ran.
 
 - **2026-11-07 — Undo for move and delete:** every move, archive, junk, delete (and delete for
   good in Trash) shows a toast ("Moved to Trash", "3 messages moved to Archive") with **Undo**

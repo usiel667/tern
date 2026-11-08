@@ -532,13 +532,12 @@ pub fn connect(ui: &Rc<Ui>) {
                 rows.push(root.downgrade());
             }
 
-            // Right-click: select this row if needed, then show the context menu.
-            let popover = gtk::PopoverMenu::from_model(Some(&menu));
-            popover.set_parent(&root);
-            popover.set_has_arrow(false);
-            popover.set_halign(gtk::Align::Start);
+            // Right-click: select this row if needed, then show the context menu. The menu is
+            // built on the first right-click: building one per row made every mailbox switch
+            // cost ~1 ms a row (~0.45 s for 500), since GTK builds new rows for a new list.
+            let popover: Rc<std::cell::OnceCell<gtk::PopoverMenu>> = Rc::default();
             let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
-            let (w, it) = (weak.clone(), item.downgrade());
+            let (w, it, row, menu) = (weak.clone(), item.downgrade(), root.downgrade(), menu.clone());
             click.connect_pressed(move |_, _, x, y| {
                 if let (Some(ui), Some(item)) = (w.upgrade(), it.upgrade()) {
                     let pos = item.position();
@@ -546,6 +545,14 @@ pub fn connect(ui: &Rc<Ui>) {
                         ui.list.selection.select_item(pos, true);
                     }
                 }
+                let Some(row) = row.upgrade() else { return };
+                let popover = popover.get_or_init(|| {
+                    let p = gtk::PopoverMenu::from_model(Some(&menu));
+                    p.set_parent(&row);
+                    p.set_has_arrow(false);
+                    p.set_halign(gtk::Align::Start);
+                    p
+                });
                 popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
                 popover.popup();
             });
