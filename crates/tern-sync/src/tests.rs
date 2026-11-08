@@ -209,6 +209,7 @@ async fn setup() -> (Engine, Arc<Fake>, async_channel::Receiver<Event>, AccountI
     );
     let (tx, rx) = async_channel::unbounded();
     let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.undo_window = Duration::ZERO;
     let cfg = AccountConfig::preset(Provider::Fastmail, "Tom", "tom@x.com");
     let id = cfg.id;
     engine.add(cfg, fake.clone());
@@ -696,6 +697,7 @@ async fn queued_ops_survive_a_restart() {
     {
         let (tx, _rx) = async_channel::unbounded();
         let mut engine = Engine::new(Store::open(&path).unwrap(), tx);
+        engine.undo_window = Duration::ZERO;
         engine.add(cfg.clone(), fake.clone());
         engine.start_account(id);
         engine.settle().await;
@@ -707,6 +709,7 @@ async fn queued_ops_survive_a_restart() {
     *fake.offline.lock().unwrap() = false;
     let (tx, _rx) = async_channel::unbounded();
     let mut engine = Engine::new(Store::open(&path).unwrap(), tx);
+    engine.undo_window = Duration::ZERO;
     engine.add(cfg, fake.clone());
     engine.start_account(id);
     engine.settle().await;
@@ -726,6 +729,7 @@ async fn setup_history() -> (Engine, Arc<Fake>, async_channel::Receiver<Event>, 
     *fake.window.lock().unwrap() = Some(5);
     let (tx, rx) = async_channel::unbounded();
     let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.undo_window = Duration::ZERO;
     engine.older_batch = 4;
     let cfg = AccountConfig::preset(Provider::Fastmail, "Tom", "tom@x.com");
     let id = cfg.id;
@@ -823,6 +827,7 @@ async fn load_older_stops_at_the_start_and_handles_failures() {
 async fn demo_history_loads_until_exhausted() {
     let (tx, _rx) = async_channel::unbounded();
     let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.undo_window = Duration::ZERO;
     let cfg = crate::demo::demo_account();
     let id = cfg.id;
     engine.add(cfg, Arc::new(crate::demo::DemoBackend::new()));
@@ -1125,6 +1130,7 @@ async fn set_signature_saves_it_to_the_accounts_file() {
     paths.save_accounts(&tern_core::account::AccountsFile { accounts: vec![cfg.clone(), other.clone()] }).unwrap();
     let (tx, rx) = async_channel::unbounded();
     let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.undo_window = Duration::ZERO;
     engine.paths = Some(paths.clone());
 
     engine.handle(Command::SetSignature(cfg.id, Some("Tom\nSent from Tern".into())));
@@ -1146,6 +1152,7 @@ async fn set_account_names_saves_them_and_new_drafts_use_the_name() {
     paths.save_accounts(&tern_core::account::AccountsFile { accounts: vec![cfg.clone()] }).unwrap();
     let (tx, rx) = async_channel::unbounded();
     let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    engine.undo_window = Duration::ZERO;
     engine.paths = Some(paths.clone());
     engine.add(cfg.clone(), Arc::new(Fake::default()));
 
@@ -1157,4 +1164,77 @@ async fn set_account_names_saves_them_and_new_drafts_use_the_name() {
     assert_eq!(engine.accounts[&cfg.id].cfg.identity.name.as_deref(), Some("Tom R."), "the running account too");
     assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, Event::AccountsChanged)));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn logged(fake: &Fake, prefix: &str) -> bool {
+    fake.log.lock().unwrap().iter().any(|l| l.starts_with(prefix))
+}
+
+#[tokio::test]
+async fn undo_puts_moved_messages_back_and_the_server_never_sees_the_move() {
+    let (mut engine, fake, rx, id) = setup().await;
+    engine.undo_window = UNDO_WINDOW;
+    let inbox_id = inbox(&engine, id);
+    let msg = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap()[0].id;
+    events(&rx);
+
+    engine.handle(Command::Move(vec![msg], MoveTarget::Trash));
+    engine.settle().await;
+    assert_eq!(engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap().len(), 1, "gone at once");
+    assert!(!logged(&fake, "move "), "held for the Undo window");
+    let key = events(&rx)
+        .into_iter()
+        .find_map(|e| match e {
+            Event::Moved { key, count: 1, to: Some(to) } if to == "Trash" => Some(key),
+            _ => None,
+        })
+        .expect("Moved event");
+
+    engine.handle(Command::UndoMove(key));
+    engine.settle().await;
+    let back = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap();
+    assert!(back.iter().any(|m| m.id == msg), "back under its old id");
+    assert!(engine.store().pending_ops(id).unwrap().is_empty(), "queued move cancelled");
+    assert!(!logged(&fake, "move "));
+    assert!(events(&rx).iter().any(|e| matches!(e, Event::MoveUndone { key: k, ids } if *k == key && ids == &[msg])));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_move_goes_out_when_the_undo_window_ends() {
+    let (mut engine, fake, rx, id) = setup().await;
+    engine.undo_window = UNDO_WINDOW;
+    let inbox_id = inbox(&engine, id);
+    let msg = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap()[0].id;
+    engine.handle(Command::Move(vec![msg], MoveTarget::Trash));
+    run_for(&mut engine, UNDO_WINDOW + Duration::from_secs(1)).await;
+    engine.settle().await;
+    assert!(logged(&fake, "move INBOX->Trash"));
+    let evs = events(&rx);
+    let key = evs.iter().find_map(|e| if let Event::Moved { key, .. } = e { Some(*key) } else { None }).unwrap();
+    assert!(evs.iter().any(|e| matches!(e, Event::UndoExpired(k) if *k == key)));
+
+    engine.handle(Command::UndoMove(key));
+    engine.settle().await;
+    let inbox_now = engine.store().list(&ListScope::Mailbox(inbox_id), false, 50).unwrap();
+    assert_eq!(inbox_now.len(), 1, "too late: stays moved");
+    assert!(engine.store().pending_ops(id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn changes_after_a_held_move_wait_for_it() {
+    let (mut engine, fake, rx, id) = setup().await;
+    engine.undo_window = UNDO_WINDOW;
+    let list = engine.store().list(&ListScope::Mailbox(inbox(&engine, id)), false, 50).unwrap();
+    let (moved, other) = (list[0].id, list[1].id);
+    events(&rx);
+    engine.handle(Command::Move(vec![moved], MoveTarget::Trash));
+    engine.handle(Command::SetFlags(vec![other], FlagChange::Flag(Some(FlagColor::Red))));
+    engine.settle().await;
+    assert!(!logged(&fake, "flags "), "queued behind the held move");
+    let key = events(&rx).into_iter().find_map(|e| if let Event::Moved { key, .. } = e { Some(key) } else { None }).unwrap();
+
+    engine.handle(Command::UndoMove(key));
+    engine.settle().await;
+    assert!(logged(&fake, "flags INBOX"), "sent once the move was cancelled");
+    assert!(!logged(&fake, "move "));
 }

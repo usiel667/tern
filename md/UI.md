@@ -26,6 +26,13 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Decisions
 
+- **2026-11-07 — Undo for move and delete:** every move, archive, junk, delete (and delete for
+  good in Trash) shows a toast ("Moved to Trash", "3 messages moved to Archive") with **Undo**
+  for 10 s (`tern_sync::UNDO_WINDOW`); Ctrl+Z takes back the newest. The server action waits
+  out the window, so Undo never touches the server; restored messages come back selected.
+  In a text field Ctrl+Z undoes typing instead (app shortcuts fire before the focused widget).
+  Not yet: undo after the window (Apple Mail moves the messages back on the server).
+
 - **2026-10-27 — Translucency like Obsidian:** the 10-15 decision below is superseded. GTK 4.24
   asks the compositor for *no* blur (ext-background-effect) unless CSS has
   `backdrop-filter`; with `window.background { backdrop-filter: blur(20px); }` Hyprland blurs

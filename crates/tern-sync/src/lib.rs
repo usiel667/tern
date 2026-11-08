@@ -42,6 +42,9 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 /// Backoff between reconnects after repeated sign-in failures.
 pub const AUTH_RETRY_MIN: Duration = Duration::from_secs(30);
 pub const AUTH_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
+/// How long a move or delete can be undone. Its server action waits this long (queued, so a
+/// quit or crash meanwhile still carries it out).
+pub const UNDO_WINDOW: Duration = Duration::from_secs(10);
 
 /// Put `accounts` in `order`; accounts not in it keep their relative order after the rest.
 fn sort_accounts(accounts: &mut [AccountConfig], order: &[AccountId]) {
@@ -138,6 +141,13 @@ pub struct Hold {
     pub delay: Duration,
 }
 
+/// A move or delete that can still be undone: its server ops are queued but held back, and
+/// copies of its messages are stashed.
+struct UndoableMove {
+    ops: Vec<(AccountId, i64)>,
+    ids: Vec<MessageId>,
+}
+
 /// A message waiting out its hold: queued in the outbox, not yet dispatched.
 struct Held {
     outbox_id: i64,
@@ -169,6 +179,9 @@ pub enum Command {
     },
     /// Take back a message still being held (see `Send.hold`); emits `SendUndone`.
     UndoSend(String),
+    /// Put back the messages of a move or delete still in its Undo window (`Event::Moved`);
+    /// emits `MoveUndone`. Too late: nothing happens.
+    UndoMove(u64),
     /// Save a new version of the message being written under `key` (kept locally, then
     /// uploaded to the account's Drafts mailbox, replacing the previous copy).
     SaveDraft { key: String, account: AccountId, draft: Box<Draft> },
@@ -223,6 +236,13 @@ pub enum Event {
     SendUndone(String),
     /// The held message with this key is on its way; it can no longer be taken back.
     SendReleased(String),
+    /// Messages were moved to the mailbox named `to` (`None`: deleted for good). Until
+    /// `UndoExpired(key)` they can be put back with `Command::UndoMove(key)`.
+    Moved { key: u64, count: usize, to: Option<String> },
+    /// The move with this key was undone; the messages are back, now with these ids.
+    MoveUndone { key: u64, ids: Vec<MessageId> },
+    /// The move with this key can no longer be undone.
+    UndoExpired(u64),
     Error { account: Option<AccountId>, message: String },
     /// Signing in to an account failed (wrong or missing password, expired token); the UI
     /// offers to sign in again (`Command::SignIn`).
@@ -246,6 +266,8 @@ enum Internal {
     SendLimit(AccountId, Option<u64>),
     /// A held message's wait is over.
     HoldOver(String),
+    /// A move's Undo window is over.
+    UndoOver(u64),
     /// A draft version was appended to a Drafts mailbox (or failed to be).
     DraftUploaded { key: String, account: AccountId, version: i64, copy: ServerCopy, result: Result<Option<String>> },
     Failed { account: Option<AccountId>, mailbox: Option<MailboxId>, error: Error },
@@ -352,6 +374,13 @@ pub struct Engine {
     sending: std::collections::HashSet<i64>,
     /// Messages waiting out their Undo Send hold, by hold key.
     held: HashMap<String, Held>,
+    /// Moves still in their Undo window, by key (`Event::Moved`).
+    undoable: HashMap<u64, UndoableMove>,
+    next_undo_key: u64,
+    /// Queued ops (`pending_ops` ids) held back until their move's Undo window is over.
+    held_ops: std::collections::HashSet<i64>,
+    /// `UNDO_WINDOW`; zero makes moves final at once (most tests).
+    undo_window: Duration,
     /// Each account's message size limit, when the server told us.
     send_limits: HashMap<AccountId, u64>,
     /// Drafts with an upload in flight (one at a time per draft).
@@ -413,6 +442,10 @@ impl Engine {
             round_started: Default::default(),
             sending: Default::default(),
             held: Default::default(),
+            undoable: Default::default(),
+            next_undo_key: 1,
+            held_ops: Default::default(),
+            undo_window: UNDO_WINDOW,
             send_limits: Default::default(),
             drafts_uploading: Default::default(),
             auth_retry: Default::default(),
@@ -693,6 +726,7 @@ impl Engine {
             Command::AdoptDraft { key, account, message } => self.adopt_draft(&key, account, message),
             Command::DiscardDraft(key) => self.discard_draft(&key),
             Command::UndoSend(key) => self.undo_send(key),
+            Command::UndoMove(key) => self.undo_move(key),
             Command::RetrySend(id) => self.retry_send(id),
             Command::DiscardSend(id) => {
                 if let Err(e) = self.store.outbox_done(id) {
@@ -862,26 +896,110 @@ impl Engine {
                 },
             ));
         }
+        let undoable = !self.undo_window.is_zero() && !local_delete.is_empty();
+        if undoable && let Err(e) = self.store.stash(&local_delete) {
+            self.fail(None, e);
+        }
         if let Err(e) = self.store.delete_local(&local_delete) {
             self.fail(None, e);
         }
         self.emit(Event::MessagesChanged(None));
         self.emit(Event::MailboxesChanged);
+        if !undoable {
+            for (account, op) in ops {
+                self.enqueue(account, op);
+            }
+            return;
+        }
+        let to = match ops.first() {
+            Some((_, Op::Move { to, .. })) => Some(self.store.mailbox(*to).map(|m| m.remote.name).unwrap_or_default()),
+            _ => None,
+        };
+        let mut held = Vec::new();
         for (account, op) in ops {
-            self.enqueue(account, op);
+            if let Some(pid) = self.queue_op(account, &op) {
+                self.held_ops.insert(pid);
+                held.push((account, pid));
+            }
+        }
+        let key = self.next_undo_key;
+        self.next_undo_key += 1;
+        self.emit(Event::Moved { key, count: local_delete.len(), to });
+        self.undoable.insert(key, UndoableMove { ops: held, ids: local_delete });
+        // Not a spawn_task: waiting isn't work in flight (no spinner, `settle` doesn't wait).
+        let (tx, delay) = (self.tx.clone(), self.undo_window);
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(Internal::UndoOver(key));
+        });
+    }
+
+    fn undo_move(&mut self, key: u64) {
+        let Some(u) = self.undoable.remove(&key) else { return };
+        for (account, pid) in &u.ops {
+            self.held_ops.remove(pid);
+            if let Err(e) = self.store.pending_done(*pid) {
+                self.fail(Some(*account), e);
+            }
+        }
+        let ids = match self.store.restore_stashed(&u.ids) {
+            Ok(ids) => ids,
+            Err(e) => {
+                self.fail(None, e);
+                Vec::new()
+            }
+        };
+        self.emit(Event::MessagesChanged(None));
+        self.emit(Event::MailboxesChanged);
+        self.emit(Event::MoveUndone { key, ids });
+        // Ops queued behind the cancelled ones were waiting on them.
+        let mut accounts: Vec<AccountId> = u.ops.iter().map(|(a, _)| *a).collect();
+        accounts.dedup();
+        for account in accounts {
+            self.drain(account);
+        }
+    }
+
+    /// The Undo window is over: send the held ops.
+    fn undo_over(&mut self, key: u64) {
+        let Some(u) = self.undoable.remove(&key) else { return };
+        if let Err(e) = self.store.drop_stashed(&u.ids) {
+            self.fail(None, e);
+        }
+        for (_, pid) in &u.ops {
+            self.held_ops.remove(pid);
+        }
+        self.emit(Event::UndoExpired(key));
+        let mut accounts: Vec<AccountId> = u.ops.iter().map(|(a, _)| *a).collect();
+        accounts.dedup();
+        for account in accounts {
+            self.drain(account);
         }
     }
 
     /// Queue an action durably, then try to deliver the account's queue.
     fn enqueue(&mut self, account: AccountId, op: Op) {
-        let json = match serde_json::to_string(&op) {
-            Ok(j) => j,
-            Err(e) => return self.fail(Some(account), e),
-        };
-        if let Err(e) = self.store.pending_push(account, &json) {
-            return self.fail(Some(account), e);
+        if self.queue_op(account, &op).is_some() {
+            self.drain(account);
         }
-        self.drain(account);
+    }
+
+    /// Queue an action durably without sending it yet; its `pending_ops` id.
+    fn queue_op(&mut self, account: AccountId, op: &Op) -> Option<i64> {
+        let json = match serde_json::to_string(op) {
+            Ok(j) => j,
+            Err(e) => {
+                self.fail(Some(account), e);
+                return None;
+            }
+        };
+        match self.store.pending_push(account, &json) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                self.fail(Some(account), e);
+                None
+            }
+        }
     }
 
     /// The account's queued ops in order, skipping any that don't parse.
@@ -952,6 +1070,11 @@ impl Engine {
             Err(e) => return self.fail(Some(account), e),
         };
         let Some((id, json)) = next else { return };
+        // A move still in its Undo window; `undo_over` drains again. Later ops wait behind it
+        // (they're already applied locally) so the server sees them in order.
+        if self.held_ops.contains(&id) {
+            return;
+        }
         let op: Op = match serde_json::from_str(&json) {
             Ok(op) => op,
             Err(e) => {
@@ -1608,6 +1731,7 @@ impl Engine {
                 self.draft_uploaded(key, account, version, copy, result);
             }
             Internal::HoldOver(key) => self.release(key),
+            Internal::UndoOver(key) => self.undo_over(key),
             Internal::SendLimit(account, bytes) => {
                 match bytes {
                     Some(n) => self.send_limits.insert(account, n),

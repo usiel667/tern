@@ -619,6 +619,66 @@ impl Store {
         tx.commit().map_err(db)
     }
 
+    /// Keep copies of these messages (bodies and all) so `restore_stashed` can put them back
+    /// after `delete_local`, for Undo. The copies live in a TEMP table: this connection only,
+    /// gone on restart.
+    pub fn stash(&mut self, ids: &[MessageId]) -> Result<()> {
+        let tx = self.conn.transaction().map_err(db)?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS stash AS SELECT * FROM main.messages WHERE 0")
+            .map_err(db)?;
+        for id in ids {
+            tx.execute("DELETE FROM temp.stash WHERE id = ?1", [id.0]).map_err(db)?;
+            tx.execute("INSERT INTO temp.stash SELECT * FROM main.messages WHERE id = ?1", [id.0])
+                .map_err(db)?;
+        }
+        tx.commit().map_err(db)
+    }
+
+    /// Put stashed messages back, under their old ids where free (SQLite can hand a deleted
+    /// row's id to new mail). One a sync has meanwhile brought back (same mailbox and remote
+    /// id) is left as it is. Returns the ids the messages have now.
+    pub fn restore_stashed(&mut self, ids: &[MessageId]) -> Result<Vec<MessageId>> {
+        let tx = self.conn.transaction().map_err(db)?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS stash AS SELECT * FROM main.messages WHERE 0")
+            .map_err(db)?;
+        let mut back = Vec::new();
+        for id in ids {
+            let Some(slot): Option<i64> = tx
+                .query_row("SELECT rowid FROM temp.stash WHERE id = ?1", [id.0], |r| r.get(0))
+                .optional()
+                .map_err(db)?
+            else {
+                continue;
+            };
+            let taken: bool = tx
+                .query_row("SELECT EXISTS(SELECT 1 FROM main.messages WHERE id = ?1)", [id.0], |r| r.get(0))
+                .map_err(db)?;
+            if taken {
+                tx.execute("UPDATE temp.stash SET id = NULL WHERE rowid = ?1", [slot]).map_err(db)?;
+            }
+            let added = tx
+                .execute("INSERT OR IGNORE INTO main.messages SELECT * FROM temp.stash WHERE rowid = ?1", [slot])
+                .map_err(db)?;
+            if added == 1 {
+                back.push(if taken { MessageId(tx.last_insert_rowid()) } else { *id });
+            }
+            tx.execute("DELETE FROM temp.stash WHERE rowid = ?1", [slot]).map_err(db)?;
+        }
+        tx.commit().map_err(db)?;
+        Ok(back)
+    }
+
+    /// Forget stashed copies (the Undo window is over).
+    pub fn drop_stashed(&mut self, ids: &[MessageId]) -> Result<()> {
+        let tx = self.conn.transaction().map_err(db)?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS stash AS SELECT * FROM main.messages WHERE 0")
+            .map_err(db)?;
+        for id in ids {
+            tx.execute("DELETE FROM temp.stash WHERE id = ?1", [id.0]).map_err(db)?;
+        }
+        tx.commit().map_err(db)
+    }
+
     // ------------------------------------------------------------------- search
 
     pub fn search(&self, q: &SearchQuery, scope: &ListScope, limit: u32) -> Result<Vec<MessageSummary>> {

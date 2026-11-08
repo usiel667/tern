@@ -621,3 +621,30 @@ fn full_resync_updates_in_place_unless_renumbered() {
     assert_eq!(rows.len(), 1);
     assert!(s.body(rows[0].id).unwrap().is_none(), "a fresh row, no cached body");
 }
+
+#[test]
+fn stashed_messages_come_back_searchable_and_dodge_a_reused_id() {
+    let (mut s, _, inbox, _) = setup();
+    add(&mut s, inbox, vec![env("1", "<a@x>", None, "Quarterly invoice", "Ann", 1), env("2", "<b@x>", None, "Lunch", "Bob", 2)]);
+    let ids: Vec<MessageId> = s.list(&ListScope::Mailbox(inbox), false, 50).unwrap().iter().map(|m| m.id).collect();
+    let search = |s: &Store, q: &str| s.search(&SearchQuery::parse(q), &ListScope::Everything, 50).unwrap().len();
+
+    s.stash(&ids).unwrap();
+    s.delete_local(&ids).unwrap();
+    assert_eq!(search(&s, "invoice"), 0);
+    // New mail meanwhile takes the freed highest id.
+    add(&mut s, inbox, vec![env("3", "<c@x>", None, "Newcomer", "Cy", 3)]);
+    let newcomer = s.list(&ListScope::Mailbox(inbox), false, 50).unwrap()[0].id;
+    assert!(ids.contains(&newcomer), "SQLite reused a freed id");
+
+    let back = s.restore_stashed(&ids).unwrap();
+    assert_eq!(back.len(), 2);
+    assert!(!back.contains(&newcomer), "the clashing one got a new id");
+    assert_eq!(s.list(&ListScope::Mailbox(inbox), false, 50).unwrap().len(), 3);
+    assert_eq!(search(&s, "invoice"), 1, "search index follows");
+    assert!(s.restore_stashed(&ids).unwrap().is_empty(), "only once");
+
+    s.stash(&back).unwrap();
+    s.drop_stashed(&back).unwrap();
+    assert!(s.restore_stashed(&back).unwrap().is_empty(), "dropped copies are gone");
+}

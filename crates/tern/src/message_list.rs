@@ -351,6 +351,20 @@ pub fn step(ui: &Rc<Ui>, delta: i32) {
     ui.list.view.scroll_to(next, gtk::ListScrollFlags::FOCUS, None);
 }
 
+/// Select these messages (the ones in the list), scrolling to the first: after Undo puts
+/// them back. Leaves the selection alone if none is listed.
+pub fn select_ids(ui: &Rc<Ui>, ids: &[MessageId]) {
+    let rows: Vec<u32> = (0..ui.list.model.n_items())
+        .filter(|&i| ui.list.model.item(i).as_ref().and_then(item_summary).is_some_and(|m| ids.contains(&m.id)))
+        .collect();
+    let Some(&first) = rows.first() else { return };
+    ui.list.selection.select_item(first, true);
+    for &i in &rows[1..] {
+        ui.list.selection.select_item(i, false);
+    }
+    ui.list.view.scroll_to(first, gtk::ListScrollFlags::FOCUS, None);
+}
+
 /// Before deleting/archiving, select the row after the last selected one so
 /// the viewer moves on instead of going blank.
 pub fn select_after_removal(ui: &Rc<Ui>) {

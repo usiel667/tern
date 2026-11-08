@@ -54,6 +54,9 @@ pub struct Ui {
     pub unsent: RefCell<Option<(adw::Dialog, gtk::ListBox)>>,
     /// The "couldn't sign in" toast while it's up, so retries don't stack more.
     signin_toast: Rc<RefCell<Option<adw::Toast>>>,
+    /// Moves that can still be undone, oldest first, with their Undo toasts (Ctrl+Z takes
+    /// back the newest).
+    undo: RefCell<Vec<(u64, adw::Toast)>>,
     reload_pending: Cell<bool>,
     sidebar_pending: Cell<bool>,
     busy: Cell<u32>,
@@ -194,6 +197,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         send_limits: Default::default(),
         unsent: RefCell::new(None),
         signin_toast: Default::default(),
+        undo: Default::default(),
         reload_pending: Cell::new(false),
         sidebar_pending: Cell::new(false),
         busy: Cell::new(0),
@@ -457,6 +461,16 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
         }
         Event::OutboxChanged => crate::outbox::refresh(ui),
         Event::SendUndone(key) => compose::send_undone(&key),
+        Event::Moved { key, count, to } => moved_toast(ui, key, count, to.as_deref()),
+        Event::UndoExpired(key) => {
+            forget_undo(ui, key);
+        }
+        Event::MoveUndone { key, ids } => {
+            forget_undo(ui, key);
+            // Show the messages again right away (reloads are otherwise batched) and select them.
+            ui.reload_list();
+            crate::message_list::select_ids(ui, &ids);
+        }
         Event::SendReleased(key) => compose::send_released(&key),
         Event::Error { account, message } => {
             let prefix = account
@@ -489,6 +503,18 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("forward", Box::new(|ui| respond(ui, tern_core::compose::ReplyKind::Forward)));
     simple("get-mail", Box::new(|ui| ui.send(Command::SyncAll)));
     simple("delete", Box::new(|ui| move_selected(ui, MoveTarget::Trash)));
+    simple("undo", Box::new(|ui| {
+        // App shortcuts fire before the focused widget sees the key: in a text field Ctrl+Z
+        // undoes typing, not the last move.
+        if let Some(text) = editing_text(ui) {
+            let _ = text.activate_action("text.undo", None);
+            return;
+        }
+        let last = ui.undo.borrow().last().map(|(key, _)| *key);
+        if let Some(key) = last {
+            ui.send(Command::UndoMove(key));
+        }
+    }));
     simple("archive", Box::new(|ui| move_selected(ui, MoveTarget::Archive)));
     simple("junk", Box::new(|ui| move_selected(ui, MoveTarget::Junk)));
     simple("not-junk", Box::new(|ui| move_selected(ui, MoveTarget::Inbox)));
@@ -592,6 +618,7 @@ fn install_actions(ui: &Rc<Ui>) {
         ("win.junk", &["<Control><Shift>j"]),
         ("win.archive", &["<Control><Alt>a"]),
         ("win.delete", &["<Control>BackSpace"]),
+        ("win.undo", &["<Control>z"]),
         ("win.search", &["<Control>f", "<Control><Alt>f"]),
         ("win.goto-inbox", &["<Control>1"]),
         ("win.toggle-sidebar", &["<Control><Shift>m"]),
@@ -744,6 +771,43 @@ fn move_selected(ui: &Rc<Ui>, target: MoveTarget) {
     // Move selection to the next message first, like Apple Mail.
     crate::message_list::select_after_removal(ui);
     ui.send(Command::Move(ids, target));
+}
+
+/// The text field (entry or text view) being typed in, if any.
+fn editing_text(ui: &Ui) -> Option<gtk::Widget> {
+    gtk::prelude::GtkWindowExt::focus(&ui.window).filter(|w| w.is::<gtk::Text>() || w.is::<gtk::TextView>())
+}
+
+/// "Moved to Trash" with an Undo button, up for the engine's Undo window.
+fn moved_toast(ui: &Rc<Ui>, key: u64, count: usize, to: Option<&str>) {
+    let title = match (count, to) {
+        (1, Some(to)) => format!("Moved to {to}"),
+        (n, Some(to)) => format!("{n} messages moved to {to}"),
+        (1, None) => "Message deleted".to_string(),
+        (n, None) => format!("{n} messages deleted"),
+    };
+    let toast = adw::Toast::builder()
+        .title(glib::markup_escape_text(&title))
+        .button_label("Undo")
+        .timeout(tern_sync::UNDO_WINDOW.as_secs() as u32)
+        .build();
+    {
+        let ui = ui.clone();
+        toast.connect_button_clicked(move |_| ui.send(Command::UndoMove(key)));
+    }
+    ui.toasts.add_toast(toast.clone());
+    ui.undo.borrow_mut().push((key, toast));
+}
+
+/// The move can't be undone any more (or just was): drop it and its toast.
+fn forget_undo(ui: &Ui, key: u64) {
+    let gone = {
+        let mut undo = ui.undo.borrow_mut();
+        undo.iter().position(|(k, _)| *k == key).map(|i| undo.remove(i).1)
+    };
+    if let Some(toast) = gone {
+        toast.dismiss();
+    }
 }
 
 fn toggle_read(ui: &Rc<Ui>) {
