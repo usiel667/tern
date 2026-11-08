@@ -21,6 +21,25 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-07 — Some marketing mail stayed white in dark mode
+
+**Saw:** in dark mode a TikTok and a Sur La Table email showed light backgrounds, with no
+sun/moon button. Separately, "Darken messages" had been switched off in Settings → Viewing.
+
+**Cause:** `format::has_own_dark_styles` trusted claims of dark support:
+- TikTok: `<meta name="color-scheme" content="light dark">` with no dark CSS at all and a
+  hard-coded `#F8F8F8` body.
+- Sur La Table: real `@media (prefers-color-scheme: dark)` rules, but only for `.dm-*`
+  classes no element uses (template leftovers), and a white body.
+
+**Fix:** a dark rule counts only if its selector reaches the message: plain element
+selectors (`body`, `td`), or classes/ids the markup uses. Only `<style>` blocks are read,
+so a `<picture>` logo swap doesn't count. Still open: mail whose dark rules recolour only
+part of the page counts as dark-aware and can show light patches.
+
+**Also:** `dev/run-tern.sh` stalled restarts because `notify-send` hung (twice); the
+notification now runs in the background.
+
 ## 2026-11-04 — Dark HTML mail: blank page, no scrolling, read mail with dots
 
 Three bugs the owner found on the first build of dark HTML mail (all from 60 fps recordings

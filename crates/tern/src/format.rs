@@ -131,14 +131,100 @@ const FORCED_DARK_CSS: &str = "html{background:#fff;color:#1c1c1c}\
     #tern-dark-3{background:#1a1b26!important;mix-blend-mode:lighten}";
 const FORCED_DARK_LAYERS: &str = "<div id=tern-dark-1></div><div id=tern-dark-2></div><div id=tern-dark-3></div>";
 
-/// Whether HTML mail ships its own dark-mode styles (WebKit then applies them itself).
+/// Whether HTML mail ships its own dark-mode styles (WebKit then applies them itself): a
+/// `prefers-color-scheme: dark` rule that reaches something in the message. Marketing mail
+/// often fakes it and would stay light:
+/// * a `<meta name="color-scheme" content="light dark">` with no dark rules (TikTok);
+/// * dark rules only for classes no element uses, template leftovers (Sur La Table).
 fn has_own_dark_styles(html: &str) -> bool {
     let l = html.to_ascii_lowercase();
-    l.contains("prefers-color-scheme")
-        || l.split("<meta").skip(1).any(|m| {
-            let tag = m.split('>').next().unwrap_or("");
-            tag.contains("color-scheme") && tag.contains("dark")
-        })
+    let (mut markup, mut styles) = (String::new(), String::new());
+    let mut rest = l.as_str();
+    while let Some(i) = rest.find("<style") {
+        markup.push_str(&rest[..i]);
+        let style = &rest[i..];
+        let css = style.find('>').map_or("", |g| &style[g + 1..]);
+        let end = css.find("</style>").unwrap_or(css.len());
+        styles.push_str(&css[..end]);
+        styles.push('\n');
+        rest = css.get(end + 8..).unwrap_or("");
+    }
+    markup.push_str(rest);
+    let classes = attribute_words(&markup, "class=");
+    let ids = attribute_words(&markup, "id=");
+
+    let mut selectors = Vec::new();
+    for (i, _) in styles.match_indices("prefers-color-scheme") {
+        let after = styles[i + "prefers-color-scheme".len()..].trim_start();
+        let Some(value) = after.strip_prefix(':') else { continue };
+        if !value.trim_start().starts_with("dark") {
+            continue;
+        }
+        if let Some(open) = value.find('{') {
+            css_selectors(block_body(&value[open + 1..]), &mut selectors);
+        }
+    }
+    selectors.iter().flat_map(|s| s.split(',')).any(|s| {
+        let names = |mark: char| -> Vec<&str> {
+            s.split(mark)
+                .skip(1)
+                .map(|t| t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')).next().unwrap_or(""))
+                .filter(|t| !t.is_empty())
+                .collect()
+        };
+        // A selector without classes or ids (body, td, :root) reaches the page; one with
+        // them only if the markup uses every one.
+        names('.').iter().all(|c| classes.contains(c)) && names('#').iter().all(|d| ids.contains(d))
+    })
+}
+
+/// The text inside a `{` already opened, up to its matching `}`.
+fn block_body(css: &str) -> &str {
+    let mut depth = 1;
+    for (i, c) in css.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &css[..i];
+                }
+            }
+            _ => {}
+        }
+    }
+    css
+}
+
+/// The selectors of the rules in a block of CSS, looking inside nested at-rules.
+fn css_selectors<'a>(mut css: &'a str, out: &mut Vec<&'a str>) {
+    while let Some(open) = css.find('{') {
+        let head = css[..open].rsplit("*/").next().unwrap_or("").trim();
+        let body = block_body(&css[open + 1..]);
+        if head.starts_with('@') {
+            css_selectors(body, out);
+        } else if !head.is_empty() {
+            out.push(head);
+        }
+        css = css.get(open + 1 + body.len() + 1..).unwrap_or("");
+    }
+}
+
+/// Every word in the markup's `name` attributes (`class=` → each class used).
+fn attribute_words<'a>(markup: &'a str, name: &str) -> std::collections::HashSet<&'a str> {
+    let mut words = std::collections::HashSet::new();
+    for (i, _) in markup.match_indices(name) {
+        if markup[..i].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '-') {
+            continue; // data-class=, subclass=
+        }
+        let v = &markup[i + name.len()..];
+        let value = match v.chars().next() {
+            Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+            _ => v.split(|c: char| c.is_whitespace() || c == '>').next().unwrap_or(""),
+        };
+        words.extend(value.split_whitespace());
+    }
+    words
 }
 
 /// Build a locked-down HTML document for a message body.
@@ -440,14 +526,31 @@ mod tests {
 
         for own in [
             "<style>@media (prefers-color-scheme: dark){body{background:#000}}</style>",
-            "<meta name=\"color-scheme\" content=\"light dark\"><p>Hi</p>",
+            "<meta name=\"color-scheme\" content=\"light dark\"><style>@media (prefers-color-scheme:dark){p{color:#fff}}</style>",
+            "<style>@media (prefers-color-scheme: dark) { /* dm */ .dm-bg { background:#111 !important } }</style>\
+             <table class=\"wrap dm-bg\"><tr><td>Hi</td></tr></table>",
+            "<style>@media screen and (prefers-color-scheme: dark){@supports (color:red){#main{color:#fff}}}</style>\
+             <div id='main'>Hi</div>",
         ] {
             let r = render_body(&body(None, Some(own)), false, true, false);
             assert_eq!(r.darkened, None, "{own}");
             assert!(!r.html.contains("tern-dark"), "{own}");
         }
-        let light_only = body(None, Some("<meta name=\"color-scheme\" content=\"light\"><p>dark chocolate</p>"));
-        assert_eq!(render_body(&light_only, false, true, false).darkened, Some(true));
+        // Claims dark support but has no dark rules (TikTok, 2026-11-07): darken it ourselves.
+        for not_own in [
+            "<meta content=\"light dark\" name=\"color-scheme\"><meta content=\"light dark\" name=\"supported-color-schemes\">\
+             <body style=\"background-color:#F8F8F8\"><p>Hi</p>",
+            "<meta name=\"color-scheme\" content=\"light\"><p>dark chocolate</p>",
+            "<style>@media (prefers-color-scheme: light){body{background:#fff}}</style>",
+            // Dark rules for classes nothing uses (Sur La Table, 2026-11-07).
+            "<style>@media (prefers-color-scheme: dark) { .dm-bg { background-color: #1a1a1a !important; }\
+             .dm-text { color: #f0f0f0 !important; } }</style>\
+             <body class=\"body\" style=\"background-color:#fff\"><p data-class=\"dm-text\">Sale</p>",
+            "<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"x.png\"></picture>\
+             <style>body{background:#fff}</style>",
+        ] {
+            assert_eq!(render_body(&body(None, Some(not_own)), false, true, false).darkened, Some(true), "{not_own}");
+        }
     }
 
     #[test]

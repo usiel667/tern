@@ -38,7 +38,8 @@ while true; do
         sleep 3
         [[ "$(mtime)" == "$now" && -x "$BIN" ]] || continue
         note "new build: restarting"
-        command -v notify-send >/dev/null && notify-send -a Tern "Tern" "Restarting with the new build"
+        # In the background: notify-send can hang (seen 2026-11-07), and that held up the restart.
+        command -v notify-send >/dev/null && { notify-send -a Tern "Tern" "Restarting with the new build" >/dev/null 2>&1 & }
         restart=1
         stop
         break
