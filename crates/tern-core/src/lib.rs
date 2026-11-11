@@ -12,6 +12,7 @@ pub mod mime;
 pub mod model;
 pub mod search;
 pub mod settings;
+pub mod themes;
 pub mod threading;
 pub mod vim_text;
 

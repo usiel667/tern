@@ -9,19 +9,24 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## To do
 
-- **Themes (Settings)** — pick a theme in Preferences, not just follow the system. The usual
-  suspects: Tokyo Night (Night/Storm/Moon/Day), Catppuccin (Mocha/Macchiato/Frappé/Latte),
-  Rosé Pine (Main/Moon/Dawn), plus probably Gruvbox, Nord, Dracula, Everforest, Kanagawa.
-  Each maps its palette onto libadwaita's named colors (window, view, headerbar, sidebar,
-  accent, destructive, …) in one CSS file per theme, so new themes are easy to add; light
-  variants (Day, Latte, Dawn) switch Adwaita to light. The message viewer's own CSS and the
-  compose body follow the theme too.
 
 ## Ideas / maybe
 
 -
 
 ## Decisions
+
+- **2026-11-11 — Themes (Settings → Appearance):** System (Tokyo Night when the desktop is
+  dark, Adwaita when light — the old behaviour), Adwaita Light / Dark, Tokyo Night (Night,
+  Storm, Moon, Day), Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon,
+  Dawn), Gruvbox Dark / Light, Nord, Dracula, Everforest Dark, Kanagawa Wave. Ten colours
+  each (`tern_core::themes`); `data/theme.css` (was tokyo-night.css) is a template filled
+  from them. Light themes force Adwaita light. Messages follow: plain text and the dark
+  darkening use the palette; light themes show HTML as sent. The owner's own GTK theme is
+  a Tokyo Night one at USER priority and hard-codes colours (row and label text, the search
+  band #24283b, checked buttons) — the template now sets those too, so other palettes don't
+  show Tokyo through. Picker shows outlined colour dots; Settings widened to 760 so five tabs
+  fit on top.
 
 - **2026-11-07 — Vim editing in the New Message body (when Vim keys are on):** starts in
   Insert; Esc → Normal (block cursor, via the text view's overwrite mode); Esc again asks to

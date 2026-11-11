@@ -73,20 +73,50 @@ pub fn load_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-    // The dark look (Tokyo Night) has to beat GTK themes that hard-code widget colours at USER
-    // priority, so it sits just above them, and only while the app is dark.
-    let dark = gtk::CssProvider::new();
-    dark.load_from_resource("/dev/tern/Tern/tokyo-night.css");
-    let styles = adw::StyleManager::default();
-    let apply = move |sm: &adw::StyleManager| {
-        if sm.is_dark() {
-            gtk::style_context_add_provider_for_display(&display, &dark, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
-        } else {
-            gtk::style_context_remove_provider_for_display(&display, &dark);
+    // System until the settings are read (`apply_theme`); follows the desktop's light/dark.
+    refresh_theme();
+    adw::StyleManager::default().connect_dark_notify(|_| refresh_theme());
+}
+
+thread_local! {
+    /// The chosen theme id and the provider holding its CSS.
+    static THEME: (RefCell<String>, gtk::CssProvider) =
+        (RefCell::new(tern_core::themes::SYSTEM.to_string()), gtk::CssProvider::new());
+}
+
+/// Use a theme (Settings → Appearance): light or dark, and its colors everywhere.
+pub fn apply_theme(id: &str) {
+    use tern_core::themes::Scheme;
+    THEME.with(|(current, _)| *current.borrow_mut() = id.to_string());
+    let (scheme, _) = tern_core::themes::resolve(id, false);
+    adw::StyleManager::default().set_color_scheme(match scheme {
+        Scheme::FollowDesktop => adw::ColorScheme::Default,
+        Scheme::Light => adw::ColorScheme::ForceLight,
+        Scheme::Dark => adw::ColorScheme::ForceDark,
+    });
+    refresh_theme();
+}
+
+/// The palette in use now (`None`: plain Adwaita).
+pub fn palette() -> Option<&'static tern_core::themes::Palette> {
+    let id = THEME.with(|(current, _)| current.borrow().clone());
+    tern_core::themes::resolve(&id, adw::StyleManager::default().is_dark()).1
+}
+
+/// Load the palette's CSS, or drop it for plain Adwaita. It has to beat GTK themes that
+/// hard-code widget colours at USER priority, so it sits just above them.
+fn refresh_theme() {
+    let Some(display) = gdk::Display::default() else { return };
+    THEME.with(|(_, provider)| match palette() {
+        Some(p) => {
+            let template = gio::resources_lookup_data("/dev/tern/Tern/theme.css", gio::ResourceLookupFlags::NONE)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            provider.load_from_string(&tern_core::themes::fill(&template, p));
+            gtk::style_context_add_provider_for_display(&display, provider, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
         }
-    };
-    apply(&styles);
-    styles.connect_dark_notify(apply);
+        None => gtk::style_context_remove_provider_for_display(&display, provider),
+    });
 }
 
 /// Builds the main window; `None` when startup failed (an error dialog is shown instead).
@@ -118,6 +148,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         engine.paths.load_accounts().map(|f| f.accounts).unwrap_or_default()
     };
     let settings = if demo { Default::default() } else { engine.paths.load_settings() };
+    apply_theme(&settings.theme);
 
     let sidebar = Sidebar::new();
     let list = MessageList::new();

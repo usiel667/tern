@@ -17,6 +17,7 @@ mod message_list;
 mod outbox;
 mod prefs;
 mod prefs_keys;
+mod prefs_theme;
 mod shortcuts;
 mod sidebar;
 mod viewer;

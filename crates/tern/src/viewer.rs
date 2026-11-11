@@ -332,7 +332,12 @@ impl Viewer {
         let settings = ui.settings.borrow().clone();
         let allow = settings.load_remote_content || self.allow_remote.borrow().contains(&id);
         let original = self.original_colors.borrow().contains(&id) == settings.darken_html;
-        let rendered = render_body(body, allow, ui.is_dark(), original);
+        let look = match crate::app::palette() {
+            Some(p) => crate::format::Look::of(p),
+            None if ui.is_dark() => crate::format::Look::ADWAITA_DARK,
+            None => crate::format::Look::LIGHT,
+        };
+        let rendered = render_body(body, allow, &look, original);
         self.remote_banner.set_revealed(rendered.blocked_remote);
         self.colors_btn.set_visible(rendered.darkened.is_some());
         // A sun while darkened (back to the original light page), a moon while original.

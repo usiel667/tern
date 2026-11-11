@@ -9,6 +9,6 @@
   </gresource>
   <gresource prefix="/dev/tern/Tern">
     <file>style.css</file>
-    <file>tokyo-night.css</file>
+    <file>theme.css</file>
   </gresource>
 </gresources>

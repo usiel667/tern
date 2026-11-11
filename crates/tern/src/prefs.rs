@@ -1,4 +1,5 @@
-//! Settings window (Ctrl+,). Pages so far: Keyboard (prefs_keys.rs), Accounts, Viewing, Signatures.
+//! Settings window (Ctrl+,). Pages so far: Appearance (prefs_theme.rs), Keyboard (prefs_keys.rs),
+//! Accounts, Viewing, Signatures.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,7 +17,9 @@ use crate::app::Ui;
 const SAVE_DELAY: Duration = Duration::from_millis(500);
 
 pub fn open(ui: &Rc<Ui>) {
-    let dialog = adw::PreferencesDialog::builder().title("Settings").build();
+    // Wide enough for all five page tabs along the top.
+    let dialog = adw::PreferencesDialog::builder().title("Settings").content_width(760).build();
+    dialog.add(&crate::prefs_theme::page(ui));
     dialog.add(&crate::prefs_keys::page(ui));
     dialog.add(&accounts_page(ui, &dialog));
     dialog.add(&viewing_page(ui));

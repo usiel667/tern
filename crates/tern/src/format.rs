@@ -107,28 +107,56 @@ pub struct RenderedBody {
     pub darkened: Option<bool>,
 }
 
-/// Tokyo Night's window colour, behind every message in dark mode.
-const DARK_BG: &str = "#1a1b26";
+/// The colours a message is shown in: the theme's (Settings → Appearance) or plain Adwaita's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Look {
+    pub dark: bool,
+    /// Behind the message (the window colour, so it never flashes another one).
+    pub bg: &'static str,
+    pub fg: &'static str,
+    pub quote: &'static str,
+    pub link: &'static str,
+}
+
+impl Look {
+    pub const LIGHT: Look = Look { dark: false, bg: "#ffffff", fg: "#1c1c1c", quote: "#6b6b6b", link: "#1c71d8" };
+    pub const ADWAITA_DARK: Look = Look { dark: true, bg: "#1e1e1e", fg: "#ffffff", quote: "#9a9a9a", link: "#78aeed" };
+
+    pub fn of(p: &'static tern_core::themes::Palette) -> Look {
+        Look { dark: p.dark, bg: p.bg, fg: p.text, quote: p.dim, link: p.accent }
+    }
+}
 
 /// Dark mode, mail with its own dark styles (or shown in its original colours): the page on a
 /// rounded sheet inside the dark window.
-const CARD_CSS: &str = "html{background:#1a1b26}body{background:#fff;color:#1c1c1c;margin:12px 16px!important;\
-    padding:16px 20px;border-radius:12px}";
+fn card_css(look: &Look) -> String {
+    format!(
+        "html{{background:{bg}}}body{{background:#fff;color:#1c1c1c;margin:12px 16px!important;\
+         padding:16px 20px;border-radius:12px}}",
+        bg = look.bg
+    )
+}
 
 /// Dark mode, any other HTML mail: three layers fixed over the visible area turn the page
 /// dark. The first inverts what's behind it and turns hues back round (so colours keep their
-/// hue), the second multiplies by the text colour (#c0caf5) and the third lifts the darkest
-/// colours to the window colour (#1a1b26). Pictures are inverted first, so they come out with
+/// hue), the second multiplies by the theme's text colour and the third lifts the darkest
+/// colours to its window colour. Pictures are inverted first, so they come out with
 /// their own colours (with a slight blue cast). Filtering only the visible area, not the whole
 /// page, matters: a filter over a tall email made a layer too big to draw and the page went
 /// blank at 4K. Pure CSS: scripts stay off and nothing is fetched.
-const FORCED_DARK_CSS: &str = "html{background:#fff;color:#1c1c1c}\
-    img,video,picture,svg,[background],[style*=background-image]{filter:invert(1) hue-rotate(180deg)}\
-    #tern-dark-1,#tern-dark-2,#tern-dark-3{position:fixed!important;inset:0!important;margin:0!important;\
-    padding:0!important;border:0!important;pointer-events:none!important;z-index:2147483647!important}\
-    #tern-dark-1{backdrop-filter:invert(1) hue-rotate(180deg)}\
-    #tern-dark-2{background:#c0caf5!important;mix-blend-mode:multiply}\
-    #tern-dark-3{background:#1a1b26!important;mix-blend-mode:lighten}";
+fn forced_dark_css(look: &Look) -> String {
+    format!(
+        "html{{background:#fff;color:#1c1c1c}}\
+         img,video,picture,svg,[background],[style*=background-image]{{filter:invert(1) hue-rotate(180deg)}}\
+         #tern-dark-1,#tern-dark-2,#tern-dark-3{{position:fixed!important;inset:0!important;margin:0!important;\
+         padding:0!important;border:0!important;pointer-events:none!important;z-index:2147483647!important}}\
+         #tern-dark-1{{backdrop-filter:invert(1) hue-rotate(180deg)}}\
+         #tern-dark-2{{background:{fg}!important;mix-blend-mode:multiply}}\
+         #tern-dark-3{{background:{bg}!important;mix-blend-mode:lighten}}",
+        fg = look.fg,
+        bg = look.bg
+    )
+}
 const FORCED_DARK_LAYERS: &str = "<div id=tern-dark-1></div><div id=tern-dark-2></div><div id=tern-dark-3></div>";
 
 /// Whether HTML mail ships its own dark-mode styles (WebKit then applies them itself): a
@@ -233,19 +261,16 @@ fn attribute_words<'a>(markup: &'a str, name: &str) -> std::collections::HashSet
 ///   (tracking pixels, remote fonts) — Apple Mail's "Load Remote Content".
 /// * `cid:` inline images are rewritten to `data:` URIs from the raw message.
 /// * Plain text is escaped, link-ified, and quote levels are styled.
-/// * In dark mode HTML mail is darkened unless it has dark styles of its own or
-///   `original_colors` (then it sits on a white sheet).
-pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool, original_colors: bool) -> RenderedBody {
+/// * Plain text takes the theme's colours (`look`). With a dark look, HTML mail is darkened
+///   to them unless it has dark styles of its own or `original_colors` (then it sits on a
+///   white sheet); with a light one it shows as sent.
+pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original_colors: bool) -> RenderedBody {
     let csp = if allow_remote {
         "default-src 'none'; img-src * data:; style-src * 'unsafe-inline'; font-src * data:; media-src *;"
     } else {
         "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:;"
     };
-    let (fg, bg, quote, link) = if dark {
-        ("#c0caf5", DARK_BG, "#9a9a9a", "#78aeed")
-    } else {
-        ("#1c1c1c", "#ffffff", "#6b6b6b", "#1c71d8")
-    };
+    let (fg, bg, quote, link, dark) = (look.fg, look.bg, look.quote, look.link, look.dark);
     let base_css = format!(
         "html{{color-scheme:{scheme}}}body{{font:15px/1.5 -apple-system,'Inter','Cantarell',system-ui,sans-serif;\
          margin:16px 24px;word-wrap:break-word;font-feature-settings:'calt' 0;}}img{{max-width:100%;height:auto}}",
@@ -257,13 +282,13 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, dark: bool, original_
             let html = inline_cid_images(html, body);
             let blocked_remote = !allow_remote && has_remote_resources(&html);
             let (page, layers, background, darkened) = if !dark {
-                ("body{background:#fff;color:#1c1c1c}", "", "#ffffff", None)
+                ("body{background:#fff;color:#1c1c1c}".to_string(), "", "#ffffff", None)
             } else if has_own_dark_styles(&html) {
-                (CARD_CSS, "", DARK_BG, None)
+                (card_css(look), "", bg, None)
             } else if original_colors {
-                (CARD_CSS, "", DARK_BG, Some(false))
+                (card_css(look), "", bg, Some(false))
             } else {
-                (FORCED_DARK_CSS, FORCED_DARK_LAYERS, DARK_BG, Some(true))
+                (forced_dark_css(look), FORCED_DARK_LAYERS, bg, Some(true))
             };
             let doc = format!(
                 "<!doctype html><html><head><meta charset=utf-8>\
@@ -425,6 +450,27 @@ pub fn move_next_to<T: PartialEq + Clone>(items: &[T], moved: &T, target: &T, af
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tokyo() -> Look {
+        Look::of(tern_core::themes::find("tokyo-night").unwrap())
+    }
+
+    #[test]
+    fn messages_take_the_themes_colors() {
+        let nord = Look::of(tern_core::themes::find("nord").unwrap());
+        let html = body(None, Some("<p>Sale</p>"));
+        let r = render_body(&html, false, &nord, false);
+        assert_eq!(r.background, "#2e3440");
+        assert!(r.html.contains("background:#eceff4!important") && r.html.contains("background:#2e3440!important"), "darkened to Nord");
+        assert!(!r.html.contains("#1a1b26") && !r.html.contains("#c0caf5"), "no Tokyo Night left");
+        let plain = MessageBody { text: Some("hi".into()), ..body(None, None) };
+        let r = render_body(&plain, false, &nord, false);
+        assert!(r.html.contains("background:#2e3440;color:#eceff4"));
+        let latte = Look::of(tern_core::themes::find("catppuccin-latte").unwrap());
+        let r = render_body(&html, false, &latte, false);
+        assert_eq!((r.darkened, r.background), (None, "#ffffff"), "light themes show HTML as sent");
+        assert!(render_body(&plain, false, &latte, false).html.contains("background:#eff1f5;color:#4c4f69"));
+    }
     use chrono::{Duration, TimeZone};
 
     #[test]
@@ -493,10 +539,10 @@ mod tests {
     #[test]
     fn remote_content_blocked_by_default() {
         let b = body(None, Some(r#"<p>Hi</p><img src="https://t.example/p.gif">"#));
-        let r = render_body(&b, false, false, false);
+        let r = render_body(&b, false, &Look::LIGHT, false);
         assert!(r.blocked_remote);
         assert!(r.html.contains("img-src data:;"));
-        let r = render_body(&b, true, false, false);
+        let r = render_body(&b, true, &Look::LIGHT, false);
         assert!(!r.blocked_remote);
         assert!(r.html.contains("img-src * data:"));
     }
@@ -504,7 +550,7 @@ mod tests {
     #[test]
     fn plain_text_is_escaped_linked_and_quoted() {
         let b = body(Some("See https://x.com/a.\n<script>\n> quoted\n>> deeper"), None);
-        let r = render_body(&b, false, true, false);
+        let r = render_body(&b, false, &tokyo(), false);
         assert!(r.html.contains("<a href=\"https://x.com/a\">https://x.com/a</a>."));
         assert!(r.html.contains("&lt;script&gt;"));
         assert!(!r.html.contains("<script>"));
@@ -514,13 +560,13 @@ mod tests {
     #[test]
     fn dark_mode_darkens_html_unless_it_has_its_own_dark_styles() {
         let plain = body(None, Some("<p style=\"color:#333\">Sale</p>"));
-        let r = render_body(&plain, false, true, false);
+        let r = render_body(&plain, false, &tokyo(), false);
         assert_eq!(r.darkened, Some(true));
         assert!(r.html.contains("tern-dark-1") && r.background == "#1a1b26");
-        let r = render_body(&plain, false, true, true);
+        let r = render_body(&plain, false, &tokyo(), true);
         assert_eq!(r.darkened, Some(false), "original colours");
         assert!(!r.html.contains("tern-dark") && r.html.contains("border-radius:12px"));
-        let r = render_body(&plain, false, false, false);
+        let r = render_body(&plain, false, &Look::LIGHT, false);
         assert_eq!(r.darkened, None, "light mode");
         assert!(!r.html.contains("tern-dark") && r.background == "#ffffff");
 
@@ -532,7 +578,7 @@ mod tests {
             "<style>@media screen and (prefers-color-scheme: dark){@supports (color:red){#main{color:#fff}}}</style>\
              <div id='main'>Hi</div>",
         ] {
-            let r = render_body(&body(None, Some(own)), false, true, false);
+            let r = render_body(&body(None, Some(own)), false, &tokyo(), false);
             assert_eq!(r.darkened, None, "{own}");
             assert!(!r.html.contains("tern-dark"), "{own}");
         }
@@ -549,7 +595,7 @@ mod tests {
             "<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"x.png\"></picture>\
              <style>body{background:#fff}</style>",
         ] {
-            assert_eq!(render_body(&body(None, Some(not_own)), false, true, false).darkened, Some(true), "{not_own}");
+            assert_eq!(render_body(&body(None, Some(not_own)), false, &tokyo(), false).darkened, Some(true), "{not_own}");
         }
     }
 

@@ -19,6 +19,8 @@ pub struct Settings {
     /// Shortcuts changed in Settings → Keyboard, by id (`keys::SHORTCUTS`); the rest keep
     /// their defaults.
     pub keys: crate::keys::Overrides,
+    /// Color theme id (`themes::choices`); "system" follows the desktop.
+    pub theme: String,
 }
 
 impl Default for Settings {
@@ -31,6 +33,7 @@ impl Default for Settings {
             list_width: None,
             vim_keys: false,
             keys: Default::default(),
+            theme: crate::themes::SYSTEM.to_string(),
         }
     }
 }

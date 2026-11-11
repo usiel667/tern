@@ -1,0 +1,135 @@
+/* Tern's themed look (Settings → Appearance). A template: @bg@, @text@ and the other
+   placeholders are filled from the chosen palette (tern_core::themes) when it loads. Loaded
+   above the user's GTK theme (USER + 1), and only while a palette is in use; see app.rs.
+   Roles: bg window, sidebar Mailboxes column, highlight hover/selection, text, dim icons and
+   secondary text, faint previews and counts, purple senders and Send, red selected sender and
+   destructive buttons, amber dates, accent unread dots and links. */
+
+:root {
+  --window-bg-color: @bg@; --window-fg-color: @text@;
+  --view-bg-color: @bg@; --view-fg-color: @text@;
+  --headerbar-bg-color: @bg@; --headerbar-fg-color: @text@;
+  --sidebar-bg-color: @sidebar@; --sidebar-fg-color: @text@;
+  --secondary-sidebar-bg-color: @bg@; --secondary-sidebar-fg-color: @text@;
+  --popover-bg-color: @sidebar@; --popover-fg-color: @text@;
+  --dialog-bg-color: @bg@; --dialog-fg-color: @text@;
+  --card-bg-color: @highlight@; --card-fg-color: @text@;
+  --accent-bg-color: @accent@; --accent-fg-color: @bg@; --accent-color: @accent@;
+}
+
+/* The desktop's GTK theme may colour rows and labels itself (the owner's is a Tokyo Night
+   theme): under any other palette that colour showed through, so text follows this one.
+   Kept to labels in rows and bars (low specificity), so the class rules below (senders,
+   dates, dim labels) still win. */
+row, row label, headerbar label, .top-bar label, .viewer-header label { color: inherit; }
+
+/* Backgrounds: one window colour, a darker mailbox sidebar, everything else see-through. */
+window.background { background-color: @bg@; color: @text@; }
+/* Dialogs (Settings, confirmations): their sheet in the window colour, not see-through. */
+dialog sheet { background-color: @bg@; color: @text@; }
+headerbar, toolbarview, .view, list, listview, scrolledwindow, viewport, statuspage,
+.navigation-sidebar, .top-bar, .bottom-bar {
+  background-color: transparent; background-image: none; box-shadow: none; color: @text@;
+}
+overlay-split-view > .sidebar-pane { background-color: @sidebar@; }
+navigation-split-view > .sidebar-pane, navigation-split-view > .content-pane { background-color: @bg@; }
+overlay-split-view > .sidebar-pane, navigation-split-view > .sidebar-pane { border-right: 1px solid @highlight@; }
+entry, searchentry, .search { background-color: @sidebar@; color: @text@; }
+/* The band behind the search box (the desktop theme had it a fixed Tokyo Night blue). */
+searchbar > revealer > box {
+  background-color: mix(@bg@, @highlight@, 0.6); border-color: alpha(@text@, 0.12);
+}
+button { color: @dim@; }
+/* Pressed-in buttons (Settings tabs, Bcc, the unread filter): the highlight, not the desktop
+   theme's colour. */
+button:checked { background-color: @highlight@; color: @text@; }
+.dim-label { color: @faint@; opacity: 1; }
+
+/* Rows: a rounded bubble for hover and selection, never a box or focus outline. */
+row, listview > row, .navigation-sidebar > row { border-radius: 8px; }
+row, row:focus, row:focus-visible, row:focus-within,
+listview > row, listview > row:focus, listview > row:focus-visible,
+listview:focus-visible > row:selected, .navigation-sidebar > row:focus-visible {
+  outline: none; outline-width: 0;
+}
+row:hover, listview > row:hover, .navigation-sidebar > row:hover {
+  background-color: alpha(@highlight@, 0.6); outline: none; box-shadow: none; border: none;
+}
+row:selected, listview > row:selected, row:selected:hover, .navigation-sidebar > row:selected {
+  background-color: @highlight@; color: @text@; box-shadow: none; border: none;
+}
+
+/* Sidebar: purple selected mailbox, faint section titles and counts. */
+.mailbox-row image { color: @dim@; }
+row:selected .mailbox-row image, row:selected .mailbox-row label { color: @purple@; }
+.sidebar-section, .badge { color: @faint@; }
+
+/* Account headers you can drag: purple, faint on hover, stronger on the account a drop would
+   land on, solid with a white name while pressed or dragged. No GTK drop outline. */
+row.account-header:hover { background-color: alpha(@purple@, 0.18); }
+row.account-header.drop-onto { background-color: alpha(@purple@, 0.28); }
+row.account-header.pressed, row.account-header.dragging { background-color: @purple@; }
+row.account-header.pressed .account-section, row.account-header.dragging .account-section,
+row.account-header.pressed .section-toggle, row.account-header.dragging .section-toggle {
+  color: #ffffff; opacity: 1;
+}
+.navigation-sidebar row:drop(active), .navigation-sidebar:drop(active) { box-shadow: none; outline: none; }
+
+/* Message list: purple senders, amber dates, faint previews, purple thread count.
+   The selected message gets a red sender and a purple subject. */
+.message-row .sender { color: @purple@; }
+.message-row .preview { color: @faint@; }
+.message-row .date { color: @amber@; }
+.message-row .thread-count, row:selected .message-row .thread-count { color: @purple@; }
+.unread-dot:not(.read) { background: @accent@; } /* read rows keep style.css's hidden dot */
+listview > row:selected .message-row .sender, row:selected .message-row .sender { color: @red@; }
+listview > row:selected .message-row .subject, row:selected .message-row .subject { color: @purple@; }
+
+/* Open message header: the sender is the big purple line, the subject smaller in body text. */
+.viewer-header { background-color: transparent; }
+.viewer-from { color: @purple@; font-size: 1.15em; font-weight: 700; }
+.viewer-header label.viewer-subject, label.viewer-subject {
+  color: @text@; opacity: 1; font-size: 1em; font-weight: 600;
+}
+
+/* New Message: purple field labels and Send button, a purple border on the field you're typing
+   in, and the writing area in the window colour (no lighter box). */
+.compose-field label.dim-label { color: @purple@; font-weight: 600; }
+.compose-field entry { border-radius: 8px; outline: 2px solid transparent; outline-offset: -2px; }
+.compose-field entry:focus-within { outline-color: @purple@; box-shadow: none; }
+textview.compose-body, textview.compose-body text { background-color: @bg@; }
+headerbar button.suggested-action { background-color: @purple@; background-image: none; color: @bg@; }
+
+/* Overlay scrollbars: the same footprint hovered or not (only the look changes). Some GTK
+   themes, the owner's Tokyo-Night one included, size the two states differently; GTK decides
+   "hovering" from the current size, so a pointer at the edge flips it every frame. */
+scrollbar.overlay-indicator > range > trough > slider,
+scrollbar.overlay-indicator:not(.dragging):not(.hovering) > range > trough > slider {
+  margin: 0;
+  transition: background-color 75ms;
+}
+scrollbar.overlay-indicator.vertical > range > trough > slider {
+  min-width: 8px; min-height: 24px; border: 2px solid transparent; margin: 0 0 0 4px;
+}
+scrollbar.overlay-indicator.vertical:not(.dragging):not(.hovering) > range > trough > slider {
+  min-width: 4px; min-height: 24px; border: 2px solid transparent; margin: 0 0 0 8px;
+}
+scrollbar.overlay-indicator.horizontal > range > trough > slider {
+  min-height: 8px; min-width: 24px; border: 2px solid transparent; margin: 4px 0 0 0;
+}
+scrollbar.overlay-indicator.horizontal:not(.dragging):not(.hovering) > range > trough > slider {
+  min-height: 4px; min-width: 24px; border: 2px solid transparent; margin: 8px 0 0 0;
+}
+
+/* Red buttons (Remove Account…): red with dark text, like the purple Send button. */
+button.destructive-action { background-color: @red@; background-image: none; color: @bg@; }
+/* Suggested buttons outside the toolbar too (a dialog's Set / OK): purple with dark text.
+   Alert dialogs mark theirs `.suggested`. */
+button.suggested-action, button.suggested { background-color: @purple@; background-image: none; color: @bg@; }
+button.suggested-action:disabled, button.suggested:disabled { background-color: alpha(@purple@, 0.35); color: alpha(@bg@, 0.7); }
+
+/* The line under the main window's toolbar row (style.css), in the highlight colour. */
+window.tern-main headerbar { padding-bottom: 6px; box-shadow: inset 0 -2px @highlight@; }
+/* The message list has two top bars (toolbar + search); libadwaita puts them in a box set 3px
+   lower than a single toolbar, which broke the line between columns. */
+window.tern-main .top-bar box.collapse-spacing { margin-top: 0; padding-top: 0; }
