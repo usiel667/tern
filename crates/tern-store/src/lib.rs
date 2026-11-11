@@ -16,7 +16,7 @@ use tern_core::threading::{ThreadInput, group_conversations};
 use tern_core::{Error, Result};
 
 const SCHEMA: &str = include_str!("schema.sql");
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 pub struct Store {
     conn: Connection,
@@ -996,7 +996,44 @@ fn migrate(conn: &Connection, from: i64) -> Result<()> {
     if from < 9 {
         tidy_previews(conn)?;
     }
+    // v10 finds text that follows inline photos (iPhone Mail); read such mail again.
+    if from < 10 {
+        reparse_lost_text(conn)?;
+    }
     Ok(())
+}
+
+/// Mail downloaded before v10 whose text came after an inline picture was stored with no
+/// text at all. Parse those again from the raw message they keep (the search index follows
+/// through the update trigger).
+fn reparse_lost_text(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN").map_err(db)?;
+    let result = (|| {
+        let rows: Vec<(i64, Vec<u8>)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, raw FROM messages WHERE raw IS NOT NULL AND body_text IS NULL AND body_html IS NULL")
+                .map_err(db)?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(db)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(db)?
+        };
+        for (id, raw) in rows {
+            let body = tern_core::mime::body_from_raw(raw);
+            if body.text.is_none() && body.html.is_none() {
+                continue;
+            }
+            conn.execute(
+                "UPDATE messages SET body_text = ?1, body_html = ?2,
+                    has_attachments = has_attachments OR ?3 WHERE id = ?4",
+                rusqlite::params![body.text, body.html, !body.attachments.is_empty(), id],
+            )
+            .map_err(db)?;
+        }
+        Ok(())
+    })();
+    conn.execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" }).map_err(db)?;
+    result
 }
 
 /// Take HTML comments and raw links out of previews stored before they were left out.

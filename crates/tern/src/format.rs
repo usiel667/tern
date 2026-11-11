@@ -105,6 +105,8 @@ pub struct RenderedBody {
     /// `Some` when the message can be shown darkened (dark mode, HTML without dark styles of
     /// its own): whether it is. The viewer's Original Colors button follows it.
     pub darkened: Option<bool>,
+    /// Attachments the message's own HTML shows (`cid:` pictures): no chip for those.
+    pub placed: Vec<usize>,
 }
 
 /// The colours a message is shown in: the theme's (Settings → Appearance) or plain Adwaita's.
@@ -273,13 +275,15 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original
     let (fg, bg, quote, link, dark) = (look.fg, look.bg, look.quote, look.link, look.dark);
     let base_css = format!(
         "html{{color-scheme:{scheme}}}body{{font:15px/1.5 -apple-system,'Inter','Cantarell',system-ui,sans-serif;\
-         margin:16px 24px;word-wrap:break-word;font-feature-settings:'calt' 0;}}img{{max-width:100%;height:auto}}",
+         margin:16px 24px;word-wrap:break-word;font-feature-settings:'calt' 0;}}img{{max-width:100%;height:auto}}\
+         .tern-picture{{margin:12px 0;white-space:normal}}.tern-picture img{{border-radius:6px}}",
         scheme = if dark { "dark" } else { "light" }
     );
 
     match &body.html {
         Some(html) => {
-            let html = inline_cid_images(html, body);
+            let (html, placed) = inline_cid_images(html, body);
+            let pictures = loose_pictures(body, &placed);
             let blocked_remote = !allow_remote && has_remote_resources(&html);
             let (page, layers, background, darkened) = if !dark {
                 ("body{background:#fff;color:#1c1c1c}".to_string(), "", "#ffffff", None)
@@ -293,9 +297,9 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original
             let doc = format!(
                 "<!doctype html><html><head><meta charset=utf-8>\
                  <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
-                 <style>{base_css} {page}</style></head><body>{layers}{html}</body></html>"
+                 <style>{base_css} {page}</style></head><body>{layers}{html}{pictures}</body></html>"
             );
-            RenderedBody { html: doc, blocked_remote, background, darkened }
+            RenderedBody { html: doc, blocked_remote, background, darkened, placed }
         }
         None => {
             let text = body.text.as_deref().unwrap_or("");
@@ -321,9 +325,10 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original
                 "<!doctype html><html><head><meta charset=utf-8>\
                  <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
                  <style>{base_css} body{{background:{bg};color:{fg};white-space:pre-wrap}} a{{color:{link}}}</style>\
-                 </head><body>{out}</body></html>"
+                 </head><body>{out}{pictures}</body></html>",
+                pictures = loose_pictures(body, &[])
             );
-            RenderedBody { html: doc, blocked_remote: false, background: bg, darkened: None }
+            RenderedBody { html: doc, blocked_remote: false, background: bg, darkened: None, placed: Vec::new() }
         }
     }
 }
@@ -356,8 +361,10 @@ fn has_remote_resources(html: &str) -> bool {
         .any(|p| lower.contains(p))
 }
 
-fn inline_cid_images(html: &str, body: &MessageBody) -> String {
+/// Put `cid:` pictures into the HTML as `data:` URIs; also returns which attachments it placed.
+fn inline_cid_images(html: &str, body: &MessageBody) -> (String, Vec<usize>) {
     let mut html = html.to_string();
+    let mut placed = Vec::new();
     for (i, att) in body.attachments.iter().enumerate() {
         let Some(cid) = &att.content_id else { continue };
         let cid = cid.trim_matches(['<', '>']);
@@ -368,9 +375,31 @@ fn inline_cid_images(html: &str, body: &MessageBody) -> String {
         if let Some(bytes) = tern_core::mime::attachment_bytes(&body.raw, i as u32) {
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             html = html.replace(&needle, &format!("data:{};base64,{data}", att.mime_type));
+            placed.push(i);
         }
     }
-    html
+    (html, placed)
+}
+
+/// Pictures sent to be shown in the message that the message doesn't place itself: iPhone
+/// Mail sends photos as inline parts next to plain text, with no HTML to put them anywhere.
+/// Shown below the text, as Apple Mail does (they keep their attachment chips for saving).
+/// Only types WebKit draws; others (HEIC) stay chips.
+fn loose_pictures(body: &MessageBody, placed: &[usize]) -> String {
+    const SHOWN: [&str; 5] = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"];
+    let mut out = String::new();
+    for (i, att) in body.attachments.iter().enumerate() {
+        let mime = att.mime_type.to_ascii_lowercase();
+        if !att.inline || placed.contains(&i) || !SHOWN.contains(&mime.as_str()) {
+            continue;
+        }
+        if let Some(bytes) = tern_core::mime::attachment_bytes(&body.raw, i as u32) {
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let alt = escape(att.filename.as_deref().unwrap_or("picture"));
+            out.push_str(&format!("<p class=tern-picture><img src=\"data:{mime};base64,{data}\" alt=\"{alt}\"></p>"));
+        }
+    }
+    out
 }
 
 /// Guess a MIME type for an outgoing attachment from its file name.
@@ -534,6 +563,40 @@ mod tests {
             list_unsubscribe_post: false,
             raw: vec![],
         }
+    }
+
+    #[test]
+    fn iphone_inline_photos_show_below_the_text() {
+        // iPhone Mail (2026-11-10): photos as inline parts with no Content-ID, then plain text.
+        let raw = "From: t@me.com\r\nSubject: Pics\r\nMime-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=B\r\n\r\n\
+            --B\r\nContent-Type: image/jpeg; name=image0.jpeg\r\nContent-Disposition: inline; filename=image0.jpeg\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nSlBFRzA=\r\n\
+            --B\r\nContent-Type: image/jpeg; name=image1.jpeg\r\nContent-Disposition: inline; filename=image1.jpeg\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nSlBFRzE=\r\n\
+            --B\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nLook at these\r\n--B--\r\n";
+        let b = tern_core::mime::body_from_raw(raw.as_bytes().to_vec());
+        assert_eq!(b.attachments.len(), 2);
+        let r = render_body(&b, false, &Look::LIGHT, false);
+        assert!(r.html.contains("Look at these"));
+        assert_eq!(r.html.matches("<p class=tern-picture><img src=\"data:image/jpeg;base64,").count(), 2, "both photos shown");
+        assert!(r.html.contains("SlBFRzA=") && r.html.contains("SlBFRzE="), "their own bytes");
+        assert!(r.html.find("Look at these") < r.html.find("<p class=tern-picture"), "below the text");
+        assert!(r.placed.is_empty(), "and still offered as chips");
+
+        // HTML that places one picture itself: that one isn't repeated, the loose one is shown.
+        let raw = "From: t@me.com\r\nMime-Version: 1.0\r\nContent-Type: multipart/related; boundary=R\r\n\r\n\
+            --R\r\nContent-Type: text/html\r\n\r\n<p>Hi <img src=\"cid:logo@x\"></p>\r\n\
+            --R\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\nContent-Disposition: inline\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nTE9HTw==\r\n\
+            --R\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=extra.png\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nRVhUUkE=\r\n--R--\r\n";
+        let b = tern_core::mime::body_from_raw(raw.as_bytes().to_vec());
+        let r = render_body(&b, false, &Look::LIGHT, false);
+        assert_eq!(r.html.matches("TE9HTw==").count(), 1, "placed logo appears once");
+        assert_eq!(r.html.matches("tern-picture><img").count(), 1, "only the loose one is added");
+        assert!(r.html.contains("RVhUUkE="));
+        assert_eq!(r.placed.len(), 1, "no chip for the logo the HTML shows");
     }
 
     #[test]

@@ -648,3 +648,27 @@ fn stashed_messages_come_back_searchable_and_dodge_a_reused_id() {
     s.drop_stashed(&back).unwrap();
     assert!(s.restore_stashed(&back).unwrap().is_empty(), "dropped copies are gone");
 }
+
+#[test]
+fn migration_to_v10_finds_text_after_inline_photos() {
+    let (mut s, _, inbox, _) = setup();
+    add(&mut s, inbox, vec![env("1", "<p@x>", None, "Pics", "Tom", 1)]);
+    let raw = "From: t@me.com\r\nMime-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n\
+        --B\r\nContent-Type: image/jpeg\r\nContent-Disposition: inline; filename=image0.jpeg\r\n\
+        Content-Transfer-Encoding: base64\r\n\r\nSlBFRzA=\r\n\
+        --B\r\nContent-Type: text/plain\r\n\r\nSunset photos\r\n--B--\r\n";
+    // As v9 stored it: the raw message and its attachments, but no text.
+    s.conn
+        .execute(
+            "UPDATE messages SET raw = ?1, body_meta = '{\"attachments\":[]}', body_text = NULL, body_html = NULL",
+            [raw.as_bytes()],
+        )
+        .unwrap();
+    s.conn.execute_batch("PRAGMA user_version = 9;").unwrap();
+    let s = Store::init(s.conn).unwrap();
+    let id = s.list(&ListScope::Mailbox(inbox), false, 10).unwrap()[0].id;
+    assert_eq!(s.body(id).unwrap().unwrap().text.as_deref().map(str::trim), Some("Sunset photos"));
+    assert!(s.message(id).unwrap().envelope.has_attachments);
+    let hits = s.search(&tern_core::search::SearchQuery::parse("sunset"), &ListScope::Everything, 10).unwrap();
+    assert_eq!(hits.len(), 1, "search finds it");
+}

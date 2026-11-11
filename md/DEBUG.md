@@ -21,6 +21,22 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-11 — Photos sent from an iPhone didn't show (and their text was lost)
+
+**Saw:** an email sent from iPhone Mail with 3 photos showed no pictures and no text.
+
+**Cause (two bugs):** iPhone Mail sends `multipart/mixed` with each photo as an *inline* part
+(no Content-ID) followed by a `text/plain` part; no HTML.
+- `mime::body_from_raw` took `body_text(0)`, the first body part — mail-parser counts inline
+  pictures as body parts, so that was a photo and the text was dropped.
+- The viewer hid every inline attachment (assumed the HTML places it with `cid:`), and
+  nothing placed these, so they vanished.
+
+**Fix:** join all text/plain (and text/html) body parts in order; inline pictures the
+message doesn't place itself are shown below the text (`format::loose_pictures`, jpeg/png/
+gif/webp/bmp) and keep chips for saving; only `cid:`-placed ones lose their chip. Schema
+v10 re-parses stored mail that had raw but no text (10 of 4,583 in the owner's cache).
+
 ## 2026-11-07 — Moving around with Vim keys was slow (mailbox switch ~0.45 s)
 
 **Saw:** j/k in Mailboxes lagged; quick presses queued and then landed at once (video: Drafts

@@ -359,7 +359,9 @@ impl Viewer {
         while let Some(c) = self.attachments.first_child() {
             self.attachments.remove(&c);
         }
-        for (i, a) in body.attachments.iter().enumerate().filter(|(_, a)| !a.inline) {
+        // A chip for every attachment the message's own HTML doesn't show (pictures shown
+        // below the text keep one, for saving).
+        for (i, a) in body.attachments.iter().enumerate().filter(|(i, _)| !rendered.placed.contains(i)) {
             let name = a.filename.clone().unwrap_or_else(|| format!("attachment-{}", i + 1));
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));

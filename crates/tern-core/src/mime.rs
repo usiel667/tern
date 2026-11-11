@@ -86,15 +86,24 @@ pub fn body_from_raw(raw: Vec<u8>) -> MessageBody {
             raw,
         };
     };
-    let text = msg.body_text(0).map(|c| c.into_owned());
-    // Only treat as HTML if there's a real text/html part (mail-parser synthesises
-    // HTML from text otherwise).
-    let html = msg
-        .html_bodies()
-        .next()
-        .filter(|p| p.is_content_type("text", "html"))
-        .and_then(|_| msg.body_html(0))
-        .map(|c| c.into_owned());
+    // Every text part of the body, in order. Not just the first body part: iPhone Mail sends
+    // photos as inline parts ahead of the text, and those count as body parts too, so the
+    // first one can be a picture (the text was lost, 2026-11-10).
+    let joined = |parts: Vec<String>| (!parts.is_empty()).then(|| parts.join("\n"));
+    let text = joined(
+        msg.text_bodies()
+            .filter(|p| p.is_content_type("text", "plain"))
+            .filter_map(|p| p.text_contents().map(str::to_owned))
+            .collect(),
+    )
+    .or_else(|| msg.body_text(0).map(|c| c.into_owned()));
+    // Only real text/html parts (mail-parser synthesises HTML from text otherwise).
+    let html = joined(
+        msg.html_bodies()
+            .filter(|p| p.is_content_type("text", "html"))
+            .filter_map(|p| p.text_contents().map(str::to_owned))
+            .collect(),
+    );
 
     let attachments = msg
         .attachments()
