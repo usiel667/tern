@@ -266,7 +266,20 @@ fn attribute_words<'a>(markup: &'a str, name: &str) -> std::collections::HashSet
 /// * Plain text takes the theme's colours (`look`). With a dark look, HTML mail is darkened
 ///   to them unless it has dark styles of its own or `original_colors` (then it sits on a
 ///   white sheet); with a light one it shows as sent.
+#[cfg(test)]
 pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original_colors: bool) -> RenderedBody {
+    render_body_with(body, allow_remote, look, original_colors, &std::collections::HashMap::new())
+}
+
+/// `render_body`, with pictures the view can't draw given as JPEGs to show instead
+/// (attachment index → bytes): HEIC photos, converted by `heic::to_jpeg`.
+pub fn render_body_with(
+    body: &MessageBody,
+    allow_remote: bool,
+    look: &Look,
+    original_colors: bool,
+    converted: &std::collections::HashMap<usize, Vec<u8>>,
+) -> RenderedBody {
     let csp = if allow_remote {
         "default-src 'none'; img-src * data:; style-src * 'unsafe-inline'; font-src * data:; media-src *;"
     } else {
@@ -283,7 +296,7 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original
     match &body.html {
         Some(html) => {
             let (html, placed) = inline_cid_images(html, body);
-            let pictures = loose_pictures(body, &placed);
+            let pictures = loose_pictures(body, &placed, converted);
             let blocked_remote = !allow_remote && has_remote_resources(&html);
             let (page, layers, background, darkened) = if !dark {
                 ("body{background:#fff;color:#1c1c1c}".to_string(), "", "#ffffff", None)
@@ -326,7 +339,7 @@ pub fn render_body(body: &MessageBody, allow_remote: bool, look: &Look, original
                  <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
                  <style>{base_css} body{{background:{bg};color:{fg};white-space:pre-wrap}} a{{color:{link}}}</style>\
                  </head><body>{out}{pictures}</body></html>",
-                pictures = loose_pictures(body, &[])
+                pictures = loose_pictures(body, &[], converted)
             );
             RenderedBody { html: doc, blocked_remote: false, background: bg, darkened: None, placed: Vec::new() }
         }
@@ -384,16 +397,26 @@ fn inline_cid_images(html: &str, body: &MessageBody) -> (String, Vec<usize>) {
 /// Pictures sent to be shown in the message that the message doesn't place itself: iPhone
 /// Mail sends photos as inline parts next to plain text, with no HTML to put them anywhere.
 /// Shown below the text, as Apple Mail does (they keep their attachment chips for saving).
-/// Only types WebKit draws; others (HEIC) stay chips.
-fn loose_pictures(body: &MessageBody, placed: &[usize]) -> String {
+/// Types WebKit draws, plus any given in `converted` (HEIC as JPEG); others stay chips.
+fn loose_pictures(body: &MessageBody, placed: &[usize], converted: &std::collections::HashMap<usize, Vec<u8>>) -> String {
     const SHOWN: [&str; 5] = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"];
     let mut out = String::new();
     for (i, att) in body.attachments.iter().enumerate() {
-        let mime = att.mime_type.to_ascii_lowercase();
-        if !att.inline || placed.contains(&i) || !SHOWN.contains(&mime.as_str()) {
+        if !att.inline || placed.contains(&i) {
             continue;
         }
-        if let Some(bytes) = tern_core::mime::attachment_bytes(&body.raw, i as u32) {
+        let (mime, bytes) = match converted.get(&i) {
+            Some(jpeg) => ("image/jpeg".to_string(), Some(jpeg.clone())),
+            None => {
+                let mime = att.mime_type.to_ascii_lowercase();
+                if !SHOWN.contains(&mime.as_str()) {
+                    continue;
+                }
+                let bytes = tern_core::mime::attachment_bytes(&body.raw, i as u32);
+                (mime, bytes)
+            }
+        };
+        if let Some(bytes) = bytes {
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             let alt = escape(att.filename.as_deref().unwrap_or("picture"));
             out.push_str(&format!("<p class=tern-picture><img src=\"data:{mime};base64,{data}\" alt=\"{alt}\"></p>"));
@@ -597,6 +620,22 @@ mod tests {
         assert_eq!(r.html.matches("tern-picture><img").count(), 1, "only the loose one is added");
         assert!(r.html.contains("RVhUUkE="));
         assert_eq!(r.placed.len(), 1, "no chip for the logo the HTML shows");
+    }
+
+    #[test]
+    fn heic_photos_show_once_converted() {
+        let raw = "From: t@me.com\r\nMime-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n\
+            --B\r\nContent-Type: image/heic; name=IMG_1.HEIC\r\nContent-Disposition: inline; filename=IMG_1.HEIC\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nSEVJQw==\r\n\
+            --B\r\nContent-Type: text/plain\r\n\r\nFrom my phone\r\n--B--\r\n";
+        let b = tern_core::mime::body_from_raw(raw.as_bytes().to_vec());
+        let r = render_body(&b, false, &Look::LIGHT, false);
+        assert!(!r.html.contains("<p class=tern-picture"), "can't be drawn yet: chip only");
+        assert!(r.placed.is_empty());
+        let converted = std::collections::HashMap::from([(0usize, b"JPEGBYTES".to_vec())]);
+        let r = render_body_with(&b, false, &Look::LIGHT, false, &converted);
+        assert!(r.html.contains("<img src=\"data:image/jpeg;base64,SlBFR0JZVEVT\""), "shown as the JPEG");
+        assert!(r.placed.is_empty(), "the chip still saves the original HEIC");
     }
 
     #[test]

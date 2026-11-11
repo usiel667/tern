@@ -36,6 +36,9 @@ dev/live-test.sh .env.gmail-test                     # same tests on the throwaw
 message doesn't place itself are shown below the text (`format::loose_pictures`, jpeg/png/
 gif/webp/bmp) and keep chips for saving; only `cid:`-placed ones lose their chip. Schema
 v10 re-parses stored mail that had raw but no text (10 of 4,583 in the owner's cache).
+HEIC photos (WebKit can't draw them) are converted for display (`heic.rs`: GTK's glycin
+HEIF loader → JPEG, longest side 2400 px; a 12 MP photo takes ~0.9 s, so it runs in
+`gio::spawn_blocking`, is cached per message, and the message redraws when it's ready).
 
 ## 2026-11-07 — Moving around with Vim keys was slow (mailbox switch ~0.45 s)
 

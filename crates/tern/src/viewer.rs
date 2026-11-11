@@ -12,7 +12,7 @@ use tern_sync::{Command, FlagChange};
 use webkit::prelude::*;
 
 use crate::app::Ui;
-use crate::format::{full_date, human_size, render_body};
+use crate::format::{full_date, human_size};
 
 /// How far `Viewer::scroll` moves the message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,9 @@ pub struct Viewer {
     original_colors: RefCell<HashSet<MessageId>>,
     unsubscribe: RefCell<Option<String>>,
     opening: Cell<Option<Opening>>,
+    /// HEIC pictures converted for showing (`None`: couldn't be read), and those being converted.
+    heic: RefCell<std::collections::HashMap<(MessageId, usize), Option<Vec<u8>>>>,
+    heic_pending: RefCell<HashSet<(MessageId, usize)>>,
 }
 
 /// Timing of the message being opened, logged when it's slow.
@@ -202,11 +205,45 @@ impl Viewer {
             allow_remote: RefCell::new(HashSet::new()),
             colors_btn,
             original_colors: RefCell::new(HashSet::new()),
+            heic: Default::default(),
+            heic_pending: Default::default(),
             unsubscribe: RefCell::new(None),
         }
     }
 
     /// Show the open message again (a setting that changes how it looks changed).
+    /// The message's inline HEIC pictures already converted to JPEG; the others start
+    /// converting in the background and the message is drawn again when they're ready.
+    fn heic_pictures(&self, ui: &Rc<Ui>, id: MessageId, body: &MessageBody) -> std::collections::HashMap<usize, Vec<u8>> {
+        let mut ready = std::collections::HashMap::new();
+        for (i, a) in body.attachments.iter().enumerate() {
+            if !a.inline || !crate::heic::is_heic(&a.mime_type, a.filename.as_deref()) {
+                continue;
+            }
+            if let Some(done) = self.heic.borrow().get(&(id, i)) {
+                if let Some(jpeg) = done {
+                    ready.insert(i, jpeg.clone());
+                }
+                continue;
+            }
+            if !self.heic_pending.borrow_mut().insert((id, i)) {
+                continue;
+            }
+            let Some(bytes) = tern_core::mime::attachment_bytes(&body.raw, i as u32) else { continue };
+            let weak = Rc::downgrade(ui);
+            glib::spawn_future_local(async move {
+                let jpeg = gtk::gio::spawn_blocking(move || crate::heic::to_jpeg(&bytes)).await.ok().flatten();
+                let Some(ui) = weak.upgrade() else { return };
+                ui.viewer.heic_pending.borrow_mut().remove(&(id, i));
+                ui.viewer.heic.borrow_mut().insert((id, i), jpeg);
+                if ui.viewer.current() == Some(id) {
+                    ui.viewer.rerender(&ui);
+                }
+            });
+        }
+        ready
+    }
+
     pub fn rerender(&self, ui: &Rc<Ui>) {
         if let Some(id) = self.current()
             && let Ok(Some(b)) = ui.store.borrow().body(id)
@@ -337,7 +374,8 @@ impl Viewer {
             None if ui.is_dark() => crate::format::Look::ADWAITA_DARK,
             None => crate::format::Look::LIGHT,
         };
-        let rendered = render_body(body, allow, &look, original);
+        let converted = self.heic_pictures(ui, id, body);
+        let rendered = crate::format::render_body_with(body, allow, &look, original, &converted);
         self.remote_banner.set_revealed(rendered.blocked_remote);
         self.colors_btn.set_visible(rendered.darkened.is_some());
         // A sun while darkened (back to the original light page), a moon while original.

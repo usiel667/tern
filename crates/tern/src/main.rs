@@ -13,6 +13,7 @@ mod compose;
 mod compose_vim;
 mod folder_zip;
 mod format;
+mod heic;
 mod message_list;
 mod outbox;
 mod prefs;
