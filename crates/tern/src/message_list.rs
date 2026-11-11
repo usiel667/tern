@@ -37,7 +37,18 @@ pub struct MessageList {
     /// A reload is putting the selection back; the viewer already shows it.
     restoring: Cell<bool>,
     /// Every row widget the factory made, to redraw one in place.
-    rows: RefCell<Vec<glib::WeakRef<gtk::Box>>>,
+    /// Each on-screen row's widgets, by the row's address (`row_key`). An entry goes when GTK
+    /// frees its row, so a reused address never finds stale widgets.
+    rows: RefCell<std::collections::HashMap<usize, Rc<RowWidgets>>>,
+}
+
+/// The key a row's widgets are kept under in `MessageList::rows`.
+fn row_key(root: &impl IsA<gtk::Widget>) -> usize {
+    root.as_ref().as_ptr() as usize
+}
+
+fn row_widgets(ui: &Ui, root: &gtk::Widget) -> Option<Rc<RowWidgets>> {
+    ui.list.rows.borrow().get(&row_key(root)).cloned()
 }
 
 /// Rows loaded per page of the cached list.
@@ -159,7 +170,7 @@ impl MessageList {
             limit: Cell::new(PAGE),
             more_cached: Cell::new(false),
             restoring: Cell::new(false),
-            rows: RefCell::new(vec![]),
+            rows: Default::default(),
         }
     }
 
@@ -325,14 +336,9 @@ pub fn reload(ui: &Rc<Ui>) {
 
 /// Redraw the on-screen row showing `m`, if there is one.
 fn redraw_row(ui: &Ui, m: &MessageSummary) {
-    for root in ui.list.rows.borrow().iter().filter_map(|r| r.upgrade()) {
-        // SAFETY: set in `connect_setup` with this exact type.
-        if let Some(w) = unsafe { root.data::<RowWidgets>("row") } {
-            let w = unsafe { w.as_ref() };
-            if w.id.get() == Some(m.id) {
-                bind_row(w, m, ui.conversations.get());
-            }
-        }
+    let shown: Vec<Rc<RowWidgets>> = ui.list.rows.borrow().values().cloned().collect();
+    for w in shown.iter().filter(|w| w.id.get() == Some(m.id)) {
+        bind_row(w, m, ui.conversations.get());
     }
 }
 
@@ -524,12 +530,16 @@ pub fn connect(ui: &Rc<Ui>) {
         factory.connect_setup(move |_, obj| {
             let item = obj.downcast_ref::<gtk::ListItem>().expect("list item");
             let (root, widgets) = build_row();
-            // SAFETY: the key is only read back as `RowWidgets` in `connect_bind`.
-            unsafe { root.set_data("row", widgets) };
             if let Some(ui) = weak.upgrade() {
-                let mut rows = ui.list.rows.borrow_mut();
-                rows.retain(|r| r.upgrade().is_some());
-                rows.push(root.downgrade());
+                let key = row_key(&root);
+                ui.list.rows.borrow_mut().insert(key, Rc::new(widgets));
+                // Forget the widgets when GTK frees the row.
+                let w = weak.clone();
+                root.add_weak_ref_notify_local(move || {
+                    if let Some(ui) = w.upgrade() {
+                        ui.list.rows.borrow_mut().remove(&key);
+                    }
+                });
             }
 
             // Right-click: select this row if needed, then show the context menu. The menu is
@@ -588,19 +598,21 @@ pub fn connect(ui: &Rc<Ui>) {
             let item = obj.downcast_ref::<gtk::ListItem>().expect("list item");
             let (Some(root), Some(data)) = (item.child(), item.item()) else { return };
             let Some(m) = item_summary(&data) else { return };
-            // SAFETY: set in `connect_setup` with this exact type.
-            if let Some(w) = unsafe { root.data::<RowWidgets>("row") } {
-                bind_row(unsafe { w.as_ref() }, &m, ui.conversations.get());
+            if let Some(w) = row_widgets(&ui, &root) {
+                bind_row(&w, &m, ui.conversations.get());
             }
         });
     }
-    factory.connect_unbind(|_, obj| {
-        let item = obj.downcast_ref::<gtk::ListItem>().expect("list item");
-        // SAFETY: set in `connect_setup` with this exact type.
-        if let Some(w) = item.child().and_then(|root| unsafe { root.data::<RowWidgets>("row") }) {
-            unsafe { w.as_ref() }.id.set(None);
-        }
-    });
+    {
+        let weak = Rc::downgrade(ui);
+        factory.connect_unbind(move |_, obj| {
+            let Some(ui) = weak.upgrade() else { return };
+            let item = obj.downcast_ref::<gtk::ListItem>().expect("list item");
+            if let Some(w) = item.child().and_then(|root| row_widgets(&ui, &root)) {
+                w.id.set(None);
+            }
+        });
+    }
 
     // Selection drives the viewer.
     {

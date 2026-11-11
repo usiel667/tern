@@ -64,7 +64,9 @@ fn prefer_gl_on_nvidia() -> bool {
         return false;
     }
     // SAFETY: first thing in `main`, before any other thread exists.
-    unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+    // GTK's OpenGL renderer; it used to be called "ngl", and GTK now warns that the old name
+    // was renamed to "gl".
+    unsafe { std::env::set_var("GSK_RENDERER", "gl") };
     true
 }
 
