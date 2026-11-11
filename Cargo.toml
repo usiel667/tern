@@ -19,13 +19,13 @@ license = "GPL-3.0-or-later"
 rust-version = "1.85"
 
 [workspace.dependencies]
-tern-core = { path = "crates/tern-core" }
-tern-store = { path = "crates/tern-store" }
-tern-imap = { path = "crates/tern-imap" }
-tern-jmap = { path = "crates/tern-jmap" }
-tern-smtp = { path = "crates/tern-smtp" }
-tern-auth = { path = "crates/tern-auth" }
-tern-sync = { path = "crates/tern-sync" }
+tern-core = { path = "crates/tern-core", version = "0.1.0" }
+tern-store = { path = "crates/tern-store", version = "0.1.0" }
+tern-imap = { path = "crates/tern-imap", version = "0.1.0" }
+tern-jmap = { path = "crates/tern-jmap", version = "0.1.0" }
+tern-smtp = { path = "crates/tern-smtp", version = "0.1.0" }
+tern-auth = { path = "crates/tern-auth", version = "0.1.0" }
+tern-sync = { path = "crates/tern-sync", version = "0.1.0" }
 
 anyhow = "1"
 thiserror = "2"
@@ -41,7 +41,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 futures = "0.3"
 directories = "6"
 mail-parser = "0.11"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 webpki-roots = "1"
