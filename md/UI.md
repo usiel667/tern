@@ -23,6 +23,17 @@ Where things live: `crates/tern/src/` (`sidebar.rs`, `message_list.rs`, `viewer.
 
 ## Decisions
 
+- **2026-11-07 — Vim editing in the New Message body (when Vim keys are on):** starts in
+  Insert; Esc → Normal (block cursor, via the text view's overwrite mode); Esc again asks to
+  close as before. i a I A o O; h j k l w b e 0 ^ $ gg G (counts, 2G); x d c y with motions,
+  dd cc yy, D C, cw = ce; p P (line-wise too); u / Ctrl+R use the text box's undo (each
+  change one step; the opening signature isn't undoable); v / V with d y c; :w saves to
+  Drafts, :q asks to close, :wq / :x both. Status line under the body. Engine is pure
+  (`tern_core::vim_text`, tested); glue in `compose_vim.rs`. Added 2026-11-11: text objects
+  (iw aw iW aW, i" a" i' a' i` a`, i( a( ib, i{ a{ iB, i[ a[, i< a<, ip ap) after d/c/y or in
+  visual; f F t T with ; and ,; `.` repeats the last change (with the text typed after c/i/a/o);
+  / and ? search (smartcase, wraps) with n / N. Not yet: registers ("a), marks, macros.
+
 - **2026-11-07 — Custom shortcuts (Settings → Keyboard):** every shortcut is listed and
   changeable: Everywhere (Ctrl/Alt/Super required, since they fire while typing), New
   Message, Message List single keys, and Vim keys (one key or two in a row). Click a row,

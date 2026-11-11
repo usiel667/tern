@@ -13,5 +13,6 @@ pub mod model;
 pub mod search;
 pub mod settings;
 pub mod threading;
+pub mod vim_text;
 
 pub use error::{Error, Result};

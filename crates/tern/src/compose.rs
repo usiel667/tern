@@ -321,6 +321,15 @@ fn open(
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&fields);
     content.append(&scroller);
+    // Vim mode under the body (-- INSERT --, NORMAL, :w), when Vim keys are on.
+    let vim_status = gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_top(4)
+        .margin_bottom(4)
+        .css_classes(["dim-label", "monospace", "vim-status"])
+        .build();
+    content.append(&vim_status);
 
     let send = gtk::Button::builder()
         .icon_name("mail-send-symbolic")
@@ -393,6 +402,21 @@ fn open(
         saved: Cell::new(from_draft.is_some()),
         debounce: RefCell::new(None),
     });
+    {
+        // :w saves to Drafts, :q asks to close, :wq / :x both.
+        let c2 = c.clone();
+        let run: Rc<dyn Fn(tern_core::vim_text::Action)> = Rc::new(move |a| {
+            use tern_core::vim_text::Action;
+            if matches!(a, Action::Save | Action::SaveClose) {
+                save_now(&c2);
+                c2.toasts.add_toast(adw::Toast::new("Saved to Drafts"));
+            }
+            if matches!(a, Action::Close | Action::SaveClose) {
+                c2.window.close();
+            }
+        });
+        crate::compose_vim::attach(ui, &c.body, &vim_status, run);
+    }
     if let Some(message) = from_draft {
         let account = c.send_limit().0;
         ui.send(Command::AdoptDraft { key: c.draft_key.clone(), account, message });
