@@ -72,15 +72,17 @@ Key decisions:
 | Unread dot, colored flags (7 colors), replied/forwarded icons | ✅ | flags round-trip via `$MailFlagBit*` like Apple |
 | Two-line previews, Apple-style dates | ✅ | leave out HTML comments and raw links (schema v8 tidies stored ones) |
 | HTML mail, remote content blocking | ✅ | |
-| Inline (cid:) images | ✅ | |
-| Attachments: list, save | ✅ | |
-| Quick Look / open with default app | ⬜ | |
-| List-Unsubscribe banner | 🟡 | opens link/mailto; RFC 8058 one-click POST TODO |
+| Inline (cid:) images | ✅ | also loose inline pictures (iPhone mail) and the text after them; schema v10 re-reads affected messages |
+| HEIC / HEIF photos | ✅ | decoded with GTK's image loader (glycin), shown as JPEG ≤ 2400 px; the attachment stays the original |
+| Dark mode for HTML mail | ✅ | darkens mail without its own dark styles; ignores fake `color-scheme` metas and unused `.dm-*` classes; sun button shows original colors |
+| Attachments: list, save, open | ✅ | chip → Open / Save…; Open copies to a private cache folder (cleared after a day) and uses the default app; programs and scripts are only saved |
+| Quick Look / open with default app | 🟡 | Open with the default app ✅; no in-app preview |
+| List-Unsubscribe banner | ✅ | RFC 8058 one-click POST from the engine when the sender offers it (no cookies, no redirects); else the website, else a mailto |
 | Mark read on open | ✅ | |
 | Mail Privacy Protection (proxy remote content) | ⬜ | blocking already prevents tracking |
-| Open message in its own window (double-click) | ⬜ | |
-| View source / raw headers | ⬜ | raw bytes are stored |
-| Print | ⬜ | WebKit print operation |
+| Open message in its own window (double-click) | ✅ | double-click / Return / Ctrl+O; its own Archive, Delete, Junk (close it), Reply, Flag; Ctrl+W / Esc close |
+| View source / raw headers | ✅ | ⋯ menu / Ctrl+Alt+U, monospace window (first 2 MB shown); Save As… (Shift+Ctrl+S) writes the .eml |
+| Print | ✅ | ⋯ menu / Ctrl+P: headers on top, light colours whatever the theme, laid out in its own page; GTK dialog prints or saves a PDF |
 | Phishing/junk detection | ⬜ | rely on server for now |
 | Desktop notifications | ✅ | click opens the message |
 | Unread count in title | ✅ | |
@@ -97,7 +99,7 @@ Key decisions:
 | Swipe gestures | ⬜ | touchpad swipe-to-archive |
 | Create / rename / delete mailboxes | ⬜ | |
 | Rules | ⬜ | |
-| Undo (Ctrl+Z) for move/delete | ⬜ | keep inverse op for ~10s |
+| Undo (Ctrl+Z) for move/delete | ✅ | engine holds the op 10 s (`pending_ops` + TEMP stash); Undo toast and Ctrl+Z; in text fields Ctrl+Z undoes typing |
 | Follow-up suggestions, Remind Me | ⬜ | |
 
 ### Search
@@ -116,7 +118,7 @@ Key decisions:
 | Cc / Bcc | ✅ | Bcc kept out of headers |
 | Attachments (pick) | ✅ | forward carries originals |
 | Attachments (drag & drop into window) | ✅ | anywhere on the window incl. body; folders zipped (`Name.zip`, no hidden files/symlinks, ≤ 200 MB); links become text; sizes on chips, 25 MB warning; Shift+Ctrl+A picker |
-| Signatures | 🟡 | per-account plain text in accounts.toml; no editor yet |
+| Signatures | ✅ | plain text per account, edited in Settings → Signatures; From swaps the signature |
 | Address autocomplete from history/contacts | ✅ | from cached mail (`contacts` table, schema v3); people you wrote to rank first; no system address book yet |
 | Rich text (bold, lists, fonts) | ⬜ | likely a WebKit contenteditable editor |
 | Save to Drafts / autosave | ✅ | local first (schema v5), then APPEND to Drafts replacing the previous copy; 4 s pause / 30 s while typing, Ctrl+S; close asks Save / Don't Save / Cancel; Edit Draft banner + Return/double-click; Bcc kept |
@@ -130,11 +132,13 @@ Key decisions:
 ### Settings
 | Feature | Status | Notes |
 |---|---|---|
-| Preferences window | ⬜ | accounts list, signatures, fetch interval, remote content default, notification scope |
-| Remove account | 🟡 | engine supports it; no UI |
-| Smooth scrolling on/off | ⬜ | owner request 2026-10-27: Preferences toggle for the message view (WebKit `enable-smooth-scrolling`); default on. On NVIDIA Tern uses GTK's OpenGL renderer, which made scrolling smooth (see md/DEBUG.md 2026-10-27) |
-| Vim key bindings (optional) | ⬜ | owner request 2026-10-21: toggle in Preferences; move around the whole app (j/k messages, h/l between panes, gg/G, / search, …) without breaking typing in text fields |
-| Themes | ⬜ | owner request 2026-10-21: Preferences picker — System/Light/Dark plus Tokyo Night (Night, Storm, Moon, Day), Catppuccin (Mocha, Macchiato, Frappé, Latte), Rosé Pine (Main, Moon, Dawn); likely also Gruvbox, Nord, Dracula, Everforest, Kanagawa. Palettes are MIT-licensed (fine under GPL, keep attribution). Must also tint the message viewer and compose, not just the chrome |
+| Preferences window | 🟡 | Accounts, Viewing, Signatures, Keyboard, Appearance; still to add: fetch interval, notification scope, Undo Send delay, conversation grouping |
+| Remove account | ✅ | Settings → Accounts, with rename and Sign In Again |
+| App zoom | ✅ | Ctrl+= / Ctrl+- / Ctrl+0, 70–200%, remembered |
+| Smooth scrolling on/off | ⬜ | not in Settings (an old `smooth_scrolling` key in settings.toml is ignored); owner request 2026-10-27: Preferences toggle for the message view (WebKit `enable-smooth-scrolling`); default on. On NVIDIA Tern uses GTK's OpenGL renderer, which made scrolling smooth (see md/DEBUG.md 2026-10-27) |
+| Vim key bindings (optional) | ✅ | Settings → Keyboard toggle: j/k, h/l, gg/G, / and more around the app, skipped while typing; New Message gets Vim editing (Normal/Insert/Visual, text objects, f/t, `.`, `/`, block cursor in Normal) |
+| Custom keyboard shortcuts | ✅ | every shortcut rebindable in Settings → Keyboard, with conflict warnings |
+| Themes | ✅ | Settings → Appearance: System, Adwaita Light/Dark and 17 palettes (Tokyo Night ×4, Catppuccin ×4, Rosé Pine ×3, Gruvbox ×2, Nord, Dracula, Everforest, Kanagawa); tints the chrome, messages and New Message. Palettes MIT-licensed, keep attribution |
 
 ## Milestones
 
@@ -182,11 +186,11 @@ Key decisions:
      (OpenSpec change `drafts-autosave`).
    - ✅ Undo Send: Send waits 10 seconds with an Undo toast; Undo brings the window back as
      it was (OpenSpec change `undo-send`).
-   - ⬜ Signature editor.
-4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, Undo, rules.
-5. **Reading polish:** full stacked conversation view, open-in-window, print, view source,
-   RFC 8058 one-click unsubscribe, Quick Look via xdg-open.
-6. **Settings + packaging:** Preferences window (incl. optional Vim key bindings, themes,
+   - ✅ Signature editor (Settings → Signatures).
+4. **Organizing:** mailbox management, Smart Mailbox editor, VIPs, rules. (Undo ✅)
+5. **Reading polish:** full stacked conversation view, in-app Quick Look. (✅ open-in-window, print,
+   view source, Save As, one-click unsubscribe, open attachments)
+6. **Settings + packaging:** Preferences window (✅ Vim keys, custom shortcuts, themes; still to do:
    the Undo Send delay: Off / 10 / 20 / 30 s, and conversation grouping: replies only (default,
    today's behaviour) or also Gmail-style — same exact subject from the same sender within
    ~3 days, decided 2026-10-22),
@@ -217,4 +221,9 @@ Key decisions:
 - Accounts without a Drafts mailbox keep drafts on this computer only, with no list of them.
 - Address suggestions can't be removed or edited, and Bcc recipients are only learned if
   they write back (they're not in the Sent copy).
+- Security audit: `dev/audit.sh` runs cargo audit, cargo deny (deny.toml: GPL-compatible
+  licenses, crates.io only), cargo machete and clippy. Unused public code isn't covered.
 - The UI layer has no automated tests yet; `--demo` plus Xvfb screenshots is the current check.
+
+
+
