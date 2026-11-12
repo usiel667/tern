@@ -67,7 +67,9 @@ pub fn page(ui: &Rc<Ui>) -> adw::PreferencesPage {
         ui.settings.borrow_mut().theme = id.to_string();
         ui.send(Command::SaveSettings(ui.settings.borrow().clone()));
         crate::app::apply_theme(id);
-        ui.viewer.rerender(&ui);
+        for v in ui.viewers() {
+            v.rerender(&ui);
+        }
     });
 
     group.add(&row);

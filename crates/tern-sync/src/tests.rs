@@ -1238,3 +1238,46 @@ async fn changes_after_a_held_move_wait_for_it() {
     assert!(logged(&fake, "flags INBOX"), "sent once the move was cancelled");
     assert!(!logged(&fake, "move "));
 }
+
+/// A one-shot HTTP server on localhost: answers `status` and hands back the request it got.
+async fn http_once(status: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/u?id=7", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 4096];
+        // Headers, then the 26-byte body.
+        while !String::from_utf8_lossy(&req).contains("One-Click") {
+            let n = sock.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+        }
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        sock.write_all(reply.as_bytes()).await.unwrap();
+        String::from_utf8_lossy(&req).into_owned()
+    });
+    (url, server)
+}
+
+#[tokio::test]
+async fn one_click_unsubscribe_posts_the_rfc_8058_body() {
+    let (url, server) = http_once("200 OK").await;
+    assert_eq!(one_click_unsubscribe(&url).await, Ok(()));
+    let req = server.await.unwrap();
+    assert!(req.starts_with("POST /u?id=7 HTTP/1.1\r\n"), "{req}");
+    assert!(req.to_ascii_lowercase().contains("content-type: application/x-www-form-urlencoded"), "{req}");
+    assert!(req.ends_with("\r\n\r\nList-Unsubscribe=One-Click"), "{req}");
+    assert!(!req.to_ascii_lowercase().contains("cookie"), "{req}");
+
+    // A redirect isn't followed but still counts; an error status doesn't.
+    let (url, server) = http_once("302 Found").await;
+    assert_eq!(one_click_unsubscribe(&url).await, Ok(()));
+    server.await.unwrap();
+    let (url, server) = http_once("404 Not Found").await;
+    assert!(one_click_unsubscribe(&url).await.unwrap_err().contains("404"));
+    server.await.unwrap();
+}

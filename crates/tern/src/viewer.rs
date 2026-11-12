@@ -24,6 +24,9 @@ pub enum Scroll {
 }
 
 pub struct Viewer {
+    /// Itself, for callbacks that outlive a call (the main window's viewer, or one in a
+    /// message window of its own).
+    me: std::rc::Weak<Viewer>,
     pub root: adw::ToolbarView,
     stack: gtk::Stack,
     status: adw::StatusPage,
@@ -47,11 +50,16 @@ pub struct Viewer {
     /// Messages switched from the default (darkened, unless Settings turns that off) with the
     /// sun/moon button, this session.
     original_colors: RefCell<HashSet<MessageId>>,
-    unsubscribe: RefCell<Option<String>>,
+    /// The open message's unsubscribe links (its `List-Unsubscribe` header).
+    unsubscribe: RefCell<Option<tern_core::mime::Unsubscribe>>,
+    /// Messages unsubscribed from this session (their banner stays hidden).
+    unsubscribed: RefCell<HashSet<MessageId>>,
     opening: Cell<Option<Opening>>,
     /// HEIC pictures converted for showing (`None`: couldn't be read), and those being converted.
     heic: RefCell<std::collections::HashMap<(MessageId, usize), Option<Vec<u8>>>>,
     heic_pending: RefCell<HashSet<(MessageId, usize)>>,
+    /// The page being printed (`message_window::print`), kept alive until it's done.
+    pub(crate) printing: RefCell<Option<webkit::WebView>>,
 }
 
 /// Timing of the message being opened, logged when it's slow.
@@ -72,7 +80,8 @@ fn header_button(icon: &str, tip: &str, action: &str) -> gtk::Button {
 }
 
 impl Viewer {
-    pub fn new() -> Self {
+    /// `standalone`: for a message window of its own (no "Open in New Window").
+    pub fn new(standalone: bool) -> Rc<Self> {
         let header = adw::HeaderBar::new();
         crate::app::same_toolbar_height(&header);
         header.set_show_title(false);
@@ -85,6 +94,15 @@ impl Viewer {
         header.pack_end(&header_button("starred-symbolic", "Flag (Ctrl+Shift+L)", "win.toggle-flag"));
         let colors_btn = gtk::Button::builder().icon_name("tern-sun-symbolic").visible(false).build();
         header.pack_end(&colors_btn);
+        let menu = gio::Menu::new();
+        if !standalone {
+            menu.append(Some("Open in New Window"), Some("win.open-window"));
+        }
+        menu.append(Some("Print…"), Some("win.print"));
+        menu.append(Some("Save As…"), Some("win.save-message"));
+        menu.append(Some("View Source"), Some("win.view-source"));
+        let more = gtk::MenuButton::builder().icon_name("view-more-symbolic").tooltip_text("More").menu_model(&menu).build();
+        header.pack_end(&more);
 
         let avatar = adw::Avatar::new(44, None, true);
         avatar.set_valign(gtk::Align::Start);
@@ -183,7 +201,8 @@ impl Viewer {
         root.add_top_bar(&header);
         root.set_content(Some(&stack));
 
-        Self {
+        Rc::new_cyclic(|me| Self {
+            me: me.clone(),
             root,
             stack,
             status,
@@ -208,13 +227,25 @@ impl Viewer {
             heic: Default::default(),
             heic_pending: Default::default(),
             unsubscribe: RefCell::new(None),
-        }
+            unsubscribed: Default::default(),
+            printing: Default::default(),
+        })
+    }
+
+    /// Whether the message shows remote content (Settings, or Load Remote Content).
+    pub fn remote_allowed(&self, ui: &Ui, id: MessageId) -> bool {
+        ui.settings.borrow().load_remote_content || self.allow_remote.borrow().contains(&id)
+    }
+
+    /// The window this viewer is in.
+    pub fn window(&self, ui: &Ui) -> gtk::Window {
+        self.root.root().and_downcast::<gtk::Window>().unwrap_or_else(|| ui.window.clone().upcast())
     }
 
     /// Show the open message again (a setting that changes how it looks changed).
     /// The message's inline HEIC pictures already converted to JPEG; the others start
     /// converting in the background and the message is drawn again when they're ready.
-    fn heic_pictures(&self, ui: &Rc<Ui>, id: MessageId, body: &MessageBody) -> std::collections::HashMap<usize, Vec<u8>> {
+    pub(crate) fn heic_pictures(&self, ui: &Rc<Ui>, id: MessageId, body: &MessageBody) -> std::collections::HashMap<usize, Vec<u8>> {
         let mut ready = std::collections::HashMap::new();
         for (i, a) in body.attachments.iter().enumerate() {
             if !a.inline || !crate::heic::is_heic(&a.mime_type, a.filename.as_deref()) {
@@ -230,14 +261,14 @@ impl Viewer {
                 continue;
             }
             let Some(bytes) = tern_core::mime::attachment_bytes(&body.raw, i as u32) else { continue };
-            let weak = Rc::downgrade(ui);
+            let (weak, me) = (Rc::downgrade(ui), self.me.clone());
             glib::spawn_future_local(async move {
                 let jpeg = gtk::gio::spawn_blocking(move || crate::heic::to_jpeg(&bytes)).await.ok().flatten();
-                let Some(ui) = weak.upgrade() else { return };
-                ui.viewer.heic_pending.borrow_mut().remove(&(id, i));
-                ui.viewer.heic.borrow_mut().insert((id, i), jpeg);
-                if ui.viewer.current() == Some(id) {
-                    ui.viewer.rerender(&ui);
+                let (Some(ui), Some(v)) = (weak.upgrade(), me.upgrade()) else { return };
+                v.heic_pending.borrow_mut().remove(&(id, i));
+                v.heic.borrow_mut().insert((id, i), jpeg);
+                if v.current() == Some(id) {
+                    v.rerender(&ui);
                 }
             });
         }
@@ -391,8 +422,9 @@ impl Viewer {
         }
         self.webview.load_html(&rendered.html, Some("about:blank"));
 
-        *self.unsubscribe.borrow_mut() = body.list_unsubscribe.clone();
-        self.unsub_banner.set_revealed(body.list_unsubscribe.is_some());
+        let unsub = tern_core::mime::unsubscribe(&body.raw);
+        self.unsub_banner.set_revealed(unsub.is_some() && !self.unsubscribed.borrow().contains(&id));
+        *self.unsubscribe.borrow_mut() = unsub;
 
         while let Some(c) = self.attachments.first_child() {
             self.attachments.remove(&c);
@@ -405,10 +437,10 @@ impl Viewer {
             chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
             chip.append(&gtk::Label::new(Some(&format!("{name}  ·  {}", human_size(a.size)))));
             let btn = gtk::Button::builder().child(&chip).css_classes(["attachment-chip"]).build();
-            let (weak, raw) = (Rc::downgrade(ui), body.raw.clone());
-            btn.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    save_attachment(&ui, raw.clone(), i as u32, name.clone());
+            let (weak, me, raw) = (Rc::downgrade(ui), self.me.clone(), body.raw.clone());
+            btn.connect_clicked(move |b| {
+                if let (Some(ui), Some(v)) = (weak.upgrade(), me.upgrade()) {
+                    attachment_menu(&ui, &v, b, raw.clone(), i as u32, name.clone());
                 }
             });
             self.attachments.append(&btn);
@@ -444,10 +476,10 @@ impl Viewer {
             if t.id == m.id {
                 row.add_prefix(&gtk::Image::from_icon_name("go-next-symbolic"));
             }
-            let (weak, id) = (Rc::downgrade(ui), t.id);
+            let (weak, me, id) = (Rc::downgrade(ui), self.me.clone(), t.id);
             row.connect_activated(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    ui.viewer.show(&ui, id);
+                if let (Some(ui), Some(v)) = (weak.upgrade(), me.upgrade()) {
+                    v.show(&ui, id);
                 }
             });
             self.thread_list.append(&row);
@@ -456,10 +488,46 @@ impl Viewer {
     }
 }
 
-fn save_attachment(ui: &Rc<Ui>, raw: Vec<u8>, index: u32, name: String) {
-    let dialog = gtk::FileDialog::builder().initial_name(&name).modal(true).build();
+/// Open / Save… for an attachment chip.
+fn attachment_menu(ui: &Rc<Ui>, v: &Rc<Viewer>, chip: &gtk::Button, raw: Vec<u8>, index: u32, name: String) {
+    let pop = gtk::Popover::new();
+    let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let open = gtk::Button::builder().label("Open").css_classes(["flat"]).build();
+    let save = gtk::Button::builder().label("Save…").css_classes(["flat"]).build();
+    for b in [&open, &save] {
+        b.child().and_downcast::<gtk::Label>().inspect(|l| l.set_xalign(0.0));
+        col.append(b);
+    }
+    pop.set_child(Some(&col));
+    pop.set_parent(chip);
+    pop.connect_closed(|p| {
+        let p = p.clone();
+        // After the clicked button's handler has run.
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    let raw = Rc::new(raw);
+    {
+        let (ui, v, raw, name, pop) = (ui.clone(), v.clone(), raw.clone(), name.clone(), pop.clone());
+        open.connect_clicked(move |_| {
+            pop.popdown();
+            open_attachment(&ui, &v.window(&ui), &raw, index, &name);
+        });
+    }
+    {
+        let (ui, v, pop) = (ui.clone(), v.clone(), pop.clone());
+        save.connect_clicked(move |_| {
+            pop.popdown();
+            save_attachment(&ui, &v.window(&ui), (*raw).clone(), index, name.clone());
+        });
+    }
+    pop.popup();
+}
+
+fn save_attachment(ui: &Rc<Ui>, window: &gtk::Window, raw: Vec<u8>, index: u32, name: String) {
+    let initial = tern_core::mime::safe_file_name(&name, "attachment");
+    let dialog = gtk::FileDialog::builder().initial_name(&initial).modal(true).build();
     let weak = Rc::downgrade(ui);
-    dialog.save(Some(&ui.window), gio::Cancellable::NONE, move |res| {
+    dialog.save(Some(window), gio::Cancellable::NONE, move |res| {
         let (Some(ui), Ok(file)) = (weak.upgrade(), res) else { return };
         let Some(path) = file.path() else { return };
         match tern_core::mime::attachment_bytes(&raw, index) {
@@ -472,21 +540,78 @@ fn save_attachment(ui: &Rc<Ui>, raw: Vec<u8>, index: u32, name: String) {
     });
 }
 
+/// Where opened attachments are put for other apps to read: a folder per open, in Tern's
+/// cache, cleared of copies older than a day each time.
+fn opened_dir() -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let base = glib::user_cache_dir().join("tern").join("opened");
+    // Only this user can read what's been opened.
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&base)?;
+    let day = Duration::from_secs(24 * 60 * 60);
+    for entry in std::fs::read_dir(&base)?.flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().unwrap_or_default() > day);
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let dir = base.join(stamp.to_string());
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    Ok(dir)
+}
+
+/// Open an attachment in the app the desktop picks for it. Programs and scripts aren't
+/// opened, only saved.
+fn open_attachment(ui: &Rc<Ui>, window: &gtk::Window, raw: &[u8], index: u32, name: &str) {
+    let mime = tern_core::mime::body_from_raw(raw.to_vec())
+        .attachments
+        .get(index as usize)
+        .map(|a| a.mime_type.clone())
+        .unwrap_or_default();
+    if tern_core::mime::risky_to_open(name, &mime) {
+        let alert = adw::AlertDialog::new(
+            Some("Save This File First?"),
+            Some(&format!("“{name}” could be a program. Tern doesn’t open programs or scripts from messages; save it, and open it yourself if you trust it.")),
+        );
+        alert.add_responses(&[("cancel", "Cancel"), ("save", "Save…")]);
+        let (ui2, w2, raw2, name2) = (ui.clone(), window.clone(), raw.to_vec(), name.to_string());
+        alert.connect_response(Some("save"), move |_, _| save_attachment(&ui2, &w2, raw2.clone(), index, name2.clone()));
+        alert.present(Some(window));
+        return;
+    }
+    let Some(bytes) = tern_core::mime::attachment_bytes(raw, index) else {
+        return ui.toast("Attachment not found in message");
+    };
+    let path = opened_dir().map(|d| d.join(tern_core::mime::safe_file_name(name, "attachment")));
+    let path = match path.and_then(|p| std::fs::write(&p, bytes).map(|()| p)) {
+        Ok(p) => p,
+        Err(e) => return ui.toast(&format!("Couldn’t open: {e}")),
+    };
+    let weak = Rc::downgrade(ui);
+    gtk::FileLauncher::new(Some(&gio::File::for_path(&path))).launch(Some(window), gio::Cancellable::NONE, move |res| {
+        if let (Err(e), Some(ui)) = (res, weak.upgrade())
+            && !e.matches(gtk::DialogError::Dismissed)
+        {
+            ui.toast(&format!("Couldn’t open: {e}"));
+        }
+    });
+}
+
 fn open_uri(window: &impl IsA<gtk::Window>, uri: &str) {
     gtk::UriLauncher::new(uri).launch(Some(window), gio::Cancellable::NONE, |_| {});
 }
 
-pub fn connect(ui: &Rc<Ui>) {
-    let v = &ui.viewer;
+/// Wire up a viewer (the main window's, or a message window's).
+pub fn connect(ui: &Rc<Ui>, v: &Rc<Viewer>) {
 
     {
-        let weak = Rc::downgrade(ui);
+        let vw = Rc::downgrade(v);
         v.webview.connect_load_changed(move |_, event| {
             if event != webkit::LoadEvent::Finished {
                 return;
             }
-            let Some(ui) = weak.upgrade() else { return };
-            let Some(o) = ui.viewer.opening.take() else { return };
+            let Some(v) = vw.upgrade() else { return };
+            let Some(o) = v.opening.take() else { return };
             let total = o.started.elapsed();
             if total >= SLOW_OPEN {
                 let body = o.body_at.map(|t| t - o.started).unwrap_or_default();
@@ -500,7 +625,7 @@ pub fn connect(ui: &Rc<Ui>) {
 
     // Links open in the default browser; the view itself never navigates.
     {
-        let weak = Rc::downgrade(ui);
+        let (weak, vw) = (Rc::downgrade(ui), Rc::downgrade(v));
         v.webview.connect_decide_policy(move |_, decision, kind| {
             use webkit::{NavigationPolicyDecision, NavigationType, PolicyDecisionType};
             if !matches!(kind, PolicyDecisionType::NavigationAction | PolicyDecisionType::NewWindowAction) {
@@ -514,88 +639,103 @@ pub fn connect(ui: &Rc<Ui>) {
             }
             decision.ignore();
             if let Some(ui) = weak.upgrade()
+                && let Some(v) = vw.upgrade()
                 && (uri.starts_with("http") || uri.starts_with("mailto:")) {
                     if let Some(addr) = uri.strip_prefix("mailto:") {
                         crate::compose::open_mailto(&ui, addr);
                     } else {
-                        open_uri(&ui.window, &uri);
+                        open_uri(&v.window(&ui), &uri);
                     }
                 }
             true
         });
     }
     {
-        let weak = Rc::downgrade(ui);
+        let (weak, vw) = (Rc::downgrade(ui), Rc::downgrade(v));
         v.draft_banner.connect_button_clicked(move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            if let Some(id) = ui.viewer.current() {
+            let (Some(ui), Some(v)) = (weak.upgrade(), vw.upgrade()) else { return };
+            if let Some(id) = v.current() {
                 crate::compose::open_draft(&ui, id);
             }
         });
     }
     {
-        let weak = Rc::downgrade(ui);
+        let (weak, vw) = (Rc::downgrade(ui), Rc::downgrade(v));
         v.colors_btn.connect_clicked(move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            if let Some(id) = ui.viewer.current() {
-                let mut set = ui.viewer.original_colors.borrow_mut();
+            let (Some(ui), Some(v)) = (weak.upgrade(), vw.upgrade()) else { return };
+            if let Some(id) = v.current() {
+                let mut set = v.original_colors.borrow_mut();
                 if !set.remove(&id) {
                     set.insert(id);
                 }
                 drop(set);
                 if let Ok(Some(b)) = ui.store.borrow().body(id) {
-                    ui.viewer.render(&ui, id, &b);
+                    v.render(&ui, id, &b);
                 }
             }
         });
     }
     {
-        let weak = Rc::downgrade(ui);
+        let (weak, vw) = (Rc::downgrade(ui), Rc::downgrade(v));
         v.remote_banner.connect_button_clicked(move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            if let Some(id) = ui.viewer.current() {
-                ui.viewer.allow_remote.borrow_mut().insert(id);
+            let (Some(ui), Some(v)) = (weak.upgrade(), vw.upgrade()) else { return };
+            if let Some(id) = v.current() {
+                v.allow_remote.borrow_mut().insert(id);
                 if let Ok(Some(b)) = ui.store.borrow().body(id) {
-                    ui.viewer.render(&ui, id, &b);
+                    v.render(&ui, id, &b);
                 }
             }
         });
     }
     {
-        let weak = Rc::downgrade(ui);
+        let (weak, vw) = (Rc::downgrade(ui), Rc::downgrade(v));
         v.unsub_banner.connect_button_clicked(move |b| {
-            let Some(ui) = weak.upgrade() else { return };
-            let Some(target) = ui.viewer.unsubscribe.borrow().clone() else { return };
-            let target = target.trim_matches(['<', '>']).to_string();
-            let confirm = adw::AlertDialog::new(
-                Some("Unsubscribe?"),
-                Some(&format!("Tern will open:\n{target}")),
-            );
+            let (Some(ui), Some(v)) = (weak.upgrade(), vw.upgrade()) else { return };
+            let (Some(u), Some(id)) = (v.unsubscribe.borrow().clone(), v.current()) else { return };
+            let sender = ui
+                .store
+                .borrow()
+                .message(id)
+                .ok()
+                .and_then(|m| m.envelope.from.first().map(|a| a.display().to_string()))
+                .unwrap_or_else(|| "this list".into());
+            // One-click (RFC 8058) when the sender takes it; otherwise their page, or an email.
+            let (body, button) = match (&u.web, &u.mail) {
+                (Some(_), _) if u.one_click => ("Tern will ask the list to stop sending you mail. No web page opens.".to_string(), "Unsubscribe"),
+                (Some(web), _) => (format!("This list unsubscribes on its website:\n{web}"), "Open Website"),
+                (None, Some(mail)) => (
+                    format!("This list unsubscribes by email. A message to {} opens for you to send.", mail.trim_start_matches("mailto:").split('?').next().unwrap_or("")),
+                    "Write Email",
+                ),
+                (None, None) => return,
+            };
+            let confirm = adw::AlertDialog::new(Some(&format!("Unsubscribe from {sender}?")), Some(&body));
             confirm.add_response("cancel", "Cancel");
-            confirm.add_response("go", "Unsubscribe");
+            confirm.add_response("go", button);
             confirm.set_response_appearance("go", adw::ResponseAppearance::Destructive);
-            let (w, banner) = (Rc::downgrade(&ui), b.clone());
+            let (w, vw, banner) = (Rc::downgrade(&ui), Rc::downgrade(&v), b.clone());
             confirm.connect_response(Some("go"), move |_, _| {
-                let Some(ui) = w.upgrade() else { return };
-                // TODO: RFC 8058 one-click POST when List-Unsubscribe-Post is present.
-                if let Some(addr) = target.strip_prefix("mailto:") {
-                    crate::compose::open_mailto(&ui, addr);
-                } else {
-                    open_uri(&ui.window, &target);
+                let (Some(ui), Some(v)) = (w.upgrade(), vw.upgrade()) else { return };
+                match (&u.web, &u.mail) {
+                    (Some(web), _) if u.one_click => ui.send(Command::Unsubscribe(web.clone())),
+                    (Some(web), _) => open_uri(&v.window(&ui), web),
+                    (None, Some(mail)) => crate::compose::open_mailto(&ui, mail.trim_start_matches("mailto:")),
+                    (None, None) => {}
                 }
+                v.unsubscribed.borrow_mut().insert(id);
                 banner.set_revealed(false);
             });
-            confirm.present(Some(&ui.window));
+            confirm.present(Some(&v.window(&ui)));
         });
     }
     // Re-render on light/dark switch.
     {
-        let weak = Rc::downgrade(ui);
+        let (weak, vw) = (Rc::downgrade(ui), Rc::downgrade(v));
         adw::StyleManager::default().connect_dark_notify(move |_| {
-            let Some(ui) = weak.upgrade() else { return };
-            if let Some(id) = ui.viewer.current()
+            let (Some(ui), Some(v)) = (weak.upgrade(), vw.upgrade()) else { return };
+            if let Some(id) = v.current()
                 && let Ok(Some(b)) = ui.store.borrow().body(id) {
-                    ui.viewer.render(&ui, id, &b);
+                    v.render(&ui, id, &b);
                 }
         });
     }

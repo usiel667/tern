@@ -346,6 +346,40 @@ pub fn render_body_with(
     }
 }
 
+/// The message as printed: its sender, recipients, date and subject on top, then the body in
+/// light colours (never darkened), whatever the theme.
+pub fn print_document(
+    body: &MessageBody,
+    e: &tern_core::model::Envelope,
+    allow_remote: bool,
+    converted: &std::collections::HashMap<usize, Vec<u8>>,
+) -> String {
+    let doc = render_body_with(body, allow_remote, &Look::LIGHT, true, converted).html;
+    let list = |a: &[tern_core::model::Address]| escape(&format_addresses(a));
+    let mut rows = vec![("From", list(&e.from))];
+    if !e.to.is_empty() {
+        rows.push(("To", list(&e.to)));
+    }
+    if !e.cc.is_empty() {
+        rows.push(("Cc", list(&e.cc)));
+    }
+    rows.push(("Date", escape(&full_date(e.date))));
+    let subject = if e.subject.is_empty() { "(no subject)".to_string() } else { escape(&e.subject) };
+    rows.push(("Subject", format!("<b>{subject}</b>")));
+    let mut head = String::from(
+        "<table style=\"font:13px/1.4 -apple-system,'Inter','Cantarell',system-ui,sans-serif;color:#1c1c1c;\
+         border-collapse:collapse;margin:0 0 12px;width:100%;border-bottom:1px solid #ccc\">",
+    );
+    for (label, value) in rows {
+        head.push_str(&format!(
+            "<tr><td style=\"color:#6b6b6b;padding:1px 12px 1px 0;vertical-align:top;width:1%;white-space:nowrap\">{label}:</td>\
+             <td style=\"padding:1px 0\">{value}</td></tr>"
+        ));
+    }
+    head.push_str("<tr><td colspan=2 style=\"height:10px\"></td></tr></table>");
+    doc.replacen("<body>", &format!("<body>{head}"), 1)
+}
+
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -636,6 +670,33 @@ mod tests {
         let r = render_body_with(&b, false, &Look::LIGHT, false, &converted);
         assert!(r.html.contains("<img src=\"data:image/jpeg;base64,SlBFR0JZVEVT\""), "shown as the JPEG");
         assert!(r.placed.is_empty(), "the chip still saves the original HEIC");
+    }
+
+    #[test]
+    fn print_has_the_headers_on_top_in_light_colors() {
+        use tern_core::model::{Address, Envelope};
+        let e = Envelope {
+            subject: "Lunch <Friday>".into(),
+            from: vec![Address { name: Some("Ann".into()), email: "ann@x.example".into() }],
+            to: vec![Address { name: None, email: "bo@y.example".into() }],
+            remote_id: "1".into(),
+            message_id: None,
+            in_reply_to: None,
+            references: vec![],
+            cc: vec![],
+            date: chrono::Utc::now(),
+            flags: Default::default(),
+            size: 0,
+            has_attachments: false,
+            preview: None,
+        };
+        let doc = print_document(&body(None, Some("<p>See you</p>")), &e, false, &Default::default());
+        let head = doc.find("<table").unwrap();
+        assert!(head < doc.find("See you").unwrap());
+        assert!(doc.contains("Lunch &lt;Friday&gt;"));
+        assert!(doc.contains("ann@x.example") && doc.contains("bo@y.example"));
+        assert!(!doc.contains("Cc:"), "no empty Cc");
+        assert!(doc.contains("color-scheme:light") && !doc.contains("tern-dark-1"), "never darkened");
     }
 
     #[test]

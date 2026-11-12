@@ -15,6 +15,7 @@ mod folder_zip;
 mod format;
 mod heic;
 mod message_list;
+mod message_window;
 mod outbox;
 mod prefs;
 mod prefs_keys;

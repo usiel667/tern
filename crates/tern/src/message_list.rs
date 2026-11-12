@@ -702,15 +702,17 @@ pub fn connect(ui: &Rc<Ui>) {
     }
     list.view.add_controller(keys);
 
-    // Double-click or Return on a draft opens it for editing, like Apple Mail.
+    // Double-click or Return opens the message in a window of its own, or a draft for
+    // editing, like Apple Mail.
     {
         let weak = Rc::downgrade(ui);
         list.view.connect_activate(move |_, _| {
             let Some(ui) = weak.upgrade() else { return };
-            if let [id] = ui.selected_ids()[..]
-                && ui.is_draft(id)
-            {
+            let Some(id) = ui.viewer.current() else { return };
+            if ui.is_draft(id) {
                 crate::compose::open_draft(&ui, id);
+            } else {
+                crate::message_window::open(&ui, id);
             }
         });
     }

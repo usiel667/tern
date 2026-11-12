@@ -172,7 +172,9 @@ fn viewing_page(ui: &Rc<Ui>) -> adw::PreferencesPage {
         move |change: &dyn Fn(&mut tern_core::settings::Settings)| {
             change(&mut ui.settings.borrow_mut());
             let s = ui.settings.borrow().clone();
-            ui.viewer.rerender(&ui);
+            for v in ui.viewers() {
+            v.rerender(&ui);
+        }
             ui.send(Command::SaveSettings(s));
         }
     };

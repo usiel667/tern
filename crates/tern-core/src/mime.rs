@@ -151,6 +151,86 @@ pub fn body_from_raw(raw: Vec<u8>) -> MessageBody {
     }
 }
 
+/// `name` made safe as a file name on its own: no folders (`/`, `\\`), no control
+/// characters, not hidden (no leading dot), at most 200 bytes; `fallback` if nothing is left.
+pub fn safe_file_name(name: &str, fallback: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c })
+        .collect();
+    let mut out = cleaned.trim().trim_start_matches('.').trim().to_string();
+    if out.len() > 200 {
+        // Keep the extension when there's a short one.
+        let ext = out.rfind('.').map(|i| out[i..].to_string()).filter(|e| e.len() <= 10).unwrap_or_default();
+        let mut cut = 200 - ext.len();
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str(&ext);
+    }
+    if out.is_empty() || out.chars().all(|c| c == '_') { fallback.to_string() } else { out }
+}
+
+/// Whether opening an attachment straight from a message could run it (a program, script,
+/// launcher or installer). Those are saved first, never opened from Tern.
+pub fn risky_to_open(name: &str, mime: &str) -> bool {
+    const EXT: &[&str] = &[
+        "appimage", "bat", "bin", "cmd", "com", "deb", "desktop", "exe", "flatpakref", "jar", "js", "lnk", "msi",
+        "pkg", "pl", "ps1", "py", "rb", "rpm", "run", "scr", "sh", "vbs", "zst",
+    ];
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let mime = mime.to_ascii_lowercase();
+    EXT.contains(&ext.as_str())
+        || mime.contains("executable")
+        || mime.contains("x-sh")
+        || mime.contains("x-shellscript")
+        || mime.contains("desktop")
+        || mime.contains("x-msdownload")
+}
+
+/// How a mailing-list message can be unsubscribed from (RFC 2369 `List-Unsubscribe`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unsubscribe {
+    /// The first `https:` link (or `http:`, when there's no https one).
+    pub web: Option<String>,
+    /// The first `mailto:` link.
+    pub mail: Option<String>,
+    /// The sender takes an RFC 8058 one-click POST to `web` (`List-Unsubscribe-Post:
+    /// List-Unsubscribe=One-Click`), so no page has to be opened. Only for https links.
+    pub one_click: bool,
+}
+
+/// The message's unsubscribe links, or `None` if it has no `List-Unsubscribe` header.
+pub fn unsubscribe(raw: &[u8]) -> Option<Unsubscribe> {
+    let msg = MessageParser::default().parse_headers(raw)?;
+    let header = msg.header_raw("List-Unsubscribe")?;
+    let mut links = Vec::new();
+    let mut rest = header;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start + 1..].find('>') else { break };
+        // Folded headers can break a long link across lines.
+        let link: String = rest[start + 1..start + 1 + len].chars().filter(|c| !c.is_whitespace()).collect();
+        links.push(link);
+        rest = &rest[start + 1 + len..];
+    }
+    let scheme = |l: &str, s: &str| l.len() > s.len() && l[..s.len()].eq_ignore_ascii_case(s);
+    let web = links
+        .iter()
+        .find(|l| scheme(l, "https://"))
+        .or_else(|| links.iter().find(|l| scheme(l, "http://")))
+        .cloned();
+    let mail = links.iter().find(|l| scheme(l, "mailto:")).cloned();
+    if web.is_none() && mail.is_none() {
+        return None;
+    }
+    let post = msg.header_raw("List-Unsubscribe-Post").is_some_and(|v| {
+        v.split(|c: char| c.is_whitespace()).collect::<String>().eq_ignore_ascii_case("List-Unsubscribe=One-Click")
+    });
+    let one_click = post && web.as_deref().is_some_and(|w| scheme(w, "https://"));
+    Some(Unsubscribe { web, mail, one_click })
+}
+
 /// Bytes of attachment `index` (as numbered in [`MessageBody::attachments`]).
 /// Rebuild an editable [`Draft`] from a message (a refused send or a saved draft).
 /// `envelope_rcpts` is the SMTP envelope's recipient list, if any: whoever is in it but not in
@@ -453,6 +533,47 @@ Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--B--\r\n"
         assert!(b.list_unsubscribe.unwrap().contains("u.example"));
         assert!(b.list_unsubscribe_post);
         assert_eq!(attachment_bytes(&raw, 0).unwrap(), b"Hello");
+    }
+
+    #[test]
+    fn programs_are_never_opened_directly() {
+        assert!(risky_to_open("install.sh", "application/octet-stream"));
+        assert!(risky_to_open("Game.AppImage", "application/octet-stream"));
+        assert!(risky_to_open("x", "application/x-executable"));
+        assert!(risky_to_open("launch", "application/x-desktop"));
+        assert!(!risky_to_open("report.pdf", "application/pdf"));
+        assert!(!risky_to_open("photo.HEIC", "image/heic"));
+    }
+
+    #[test]
+    fn safe_file_names() {
+        assert_eq!(safe_file_name("report.pdf", "x"), "report.pdf");
+        assert_eq!(safe_file_name("../../.bashrc", "x"), "_.._.bashrc");
+        assert_eq!(safe_file_name(".hidden", "x"), "hidden");
+        assert_eq!(safe_file_name("a\\b\nc", "x"), "a_b_c");
+        assert_eq!(safe_file_name("  ", "attachment"), "attachment");
+        assert_eq!(safe_file_name("/", "attachment"), "attachment");
+        let long = format!("{}.jpeg", "é".repeat(150));
+        let short = safe_file_name(&long, "x");
+        assert!(short.len() <= 200 && short.ends_with(".jpeg"), "{short}");
+    }
+
+    #[test]
+    fn unsubscribe_links() {
+        let raw = b"From: a@b.c\r\nList-Unsubscribe: <mailto:u@list.example?subject=unsubscribe>,\r\n \
+<https://list.example/u?id=1\r\n 23>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\nhi\r\n";
+        let u = unsubscribe(raw).unwrap();
+        assert_eq!(u.web.as_deref(), Some("https://list.example/u?id=123"));
+        assert_eq!(u.mail.as_deref(), Some("mailto:u@list.example?subject=unsubscribe"));
+        assert!(u.one_click);
+
+        // One-click needs the Post header and an https link.
+        let u = unsubscribe(b"List-Unsubscribe: <http://x.example/u>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\n").unwrap();
+        assert_eq!((u.web.as_deref(), u.one_click), (Some("http://x.example/u"), false));
+        let u = unsubscribe(b"List-Unsubscribe: <https://x.example/u>\r\n\r\n").unwrap();
+        assert!(!u.one_click);
+        assert_eq!(unsubscribe(b"List-Unsubscribe: <ftp://x>\r\n\r\n"), None);
+        assert_eq!(unsubscribe(b"Subject: x\r\n\r\n"), None);
     }
 
     #[test]

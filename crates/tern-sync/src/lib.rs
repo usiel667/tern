@@ -209,6 +209,9 @@ pub enum Command {
     SetAccountNames { account: AccountId, description: String, name: Option<String> },
     /// The app settings, saved to settings.toml.
     SaveSettings(tern_core::settings::Settings),
+    /// RFC 8058 one-click unsubscribe: POST `List-Unsubscribe=One-Click` to this https link
+    /// (from a message whose `List-Unsubscribe-Post` asks for it); emits `Unsubscribed`.
+    Unsubscribe(String),
     Shutdown,
 }
 
@@ -243,10 +246,38 @@ pub enum Event {
     MoveUndone { key: u64, ids: Vec<MessageId> },
     /// The move with this key can no longer be undone.
     UndoExpired(u64),
+    /// A one-click unsubscribe (`Command::Unsubscribe`) to this link finished; `Err` says why
+    /// it didn't work.
+    Unsubscribed { url: String, result: std::result::Result<(), String> },
     Error { account: Option<AccountId>, message: String },
     /// Signing in to an account failed (wrong or missing password, expired token); the UI
     /// offers to sign in again (`Command::SignIn`).
     SignInFailed { account: AccountId, message: String },
+}
+
+/// RFC 8058: a POST with only `List-Unsubscribe=One-Click` in its body, no cookies, no
+/// redirects followed (the RFC forbids senders from redirecting; a redirect still means the
+/// request arrived).
+async fn one_click_unsubscribe(url: &str) -> std::result::Result<(), String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("Tern")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body("List-Unsubscribe=One-Click")
+        .send()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    let status = resp.status();
+    if status.is_success() || status.is_redirection() {
+        Ok(())
+    } else {
+        Err(format!("the list answered {status}"))
+    }
 }
 
 enum Internal {
@@ -744,6 +775,13 @@ impl Engine {
                 if let Some(Err(e)) = self.paths.as_ref().map(|p| p.save_settings(&settings)) {
                     self.fail(None, e);
                 }
+            }
+            Command::Unsubscribe(url) => {
+                let events = self.events.clone();
+                tokio::spawn(async move {
+                    let result = one_click_unsubscribe(&url).await;
+                    let _ = events.send(Event::Unsubscribed { url, result }).await;
+                });
             }
             Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),

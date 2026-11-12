@@ -100,9 +100,19 @@ impl DemoBackend {
                 raw.push_str(&format!("In-Reply-To: <{r}@demo>\r\nReferences: <{r}@demo>\r\n"));
             }
             if s.html {
-                raw.push_str("List-Unsubscribe: <https://example.com/unsubscribe>\r\n");
+                raw.push_str("List-Unsubscribe: <mailto:unsubscribe@example.com>, <https://example.com/unsubscribe>\r\n");
             }
-            raw.push_str(&format!("MIME-Version: 1.0\r\nContent-Type: {ctype}; charset=utf-8\r\n\r\n{}\r\n", s.body));
+            // The Q3 numbers come with the spreadsheet they mention.
+            let attachment = (s.id == "m4").then_some(("q3-fulfillment.csv", "week,orders,latency_h\r\n1,412,30\r\n2,455,27\r\n3,480,25\r\n"));
+            match attachment {
+                Some((name, data)) => raw.push_str(&format!(
+                    "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"demo\"\r\n\r\n\
+                     --demo\r\nContent-Type: {ctype}; charset=utf-8\r\n\r\n{}\r\n\
+                     --demo\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename=\"{name}\"\r\n\r\n{data}\r\n--demo--\r\n",
+                    s.body
+                )),
+                None => raw.push_str(&format!("MIME-Version: 1.0\r\nContent-Type: {ctype}; charset=utf-8\r\n\r\n{}\r\n", s.body)),
+            }
             let preview = if s.html {
                 Some(strip_tags(s.body))
             } else {
@@ -120,7 +130,7 @@ impl DemoBackend {
                 date,
                 flags: Flags { seen: s.seen, flag: s.flag, ..Default::default() },
                 size: raw.len() as u32,
-                has_attachments: false,
+                has_attachments: attachment.is_some(),
                 preview: preview.map(|p| p.chars().take(200).collect()),
             };
             boxes.get_mut(s.mailbox).unwrap().push((env, raw.into_bytes()));

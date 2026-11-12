@@ -39,7 +39,9 @@ pub struct Ui {
     pub split: adw::NavigationSplitView,
     pub sidebar: Sidebar,
     pub list: MessageList,
-    pub viewer: Viewer,
+    pub viewer: Rc<Viewer>,
+    /// Messages open in windows of their own.
+    pub message_windows: RefCell<Vec<(adw::ApplicationWindow, Rc<Viewer>)>>,
     pub scope: RefCell<ListScope>,
     pub scope_title: RefCell<String>,
     pub conversations: Cell<bool>,
@@ -152,7 +154,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
 
     let sidebar = Sidebar::new();
     let list = MessageList::new();
-    let viewer = Viewer::new();
+    let viewer = Viewer::new(false);
 
     let split = adw::NavigationSplitView::new();
     let (list_column, list_handle) = with_resize_handle(&list.root);
@@ -218,6 +220,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
         sidebar,
         list,
         viewer,
+        message_windows: Default::default(),
         scope: RefCell::new(ListScope::Role(MailboxRole::Inbox)),
         scope_title: RefCell::new("All Inboxes".into()),
         conversations: Cell::new(true),
@@ -246,7 +249,7 @@ pub fn build(app: &adw::Application, args: Args) -> Option<Rc<Ui>> {
     }
     connect_resize_handle(&ui, &mailboxes_handle, &mailboxes_column, Column::Mailboxes);
     connect_resize_handle(&ui, &list_handle, &list_column, Column::List);
-    crate::viewer::connect(&ui);
+    crate::viewer::connect(&ui, &ui.viewer.clone());
     crate::vim::connect(&ui);
     install_actions(&ui);
     spawn_event_loop(&ui);
@@ -413,6 +416,13 @@ impl Ui {
         }));
     }
 
+    /// Every message view: the main window's, then those in windows of their own.
+    pub fn viewers(&self) -> Vec<Rc<Viewer>> {
+        let mut all = vec![self.viewer.clone()];
+        all.extend(self.message_windows.borrow().iter().map(|(_, v)| v.clone()));
+        all
+    }
+
     /// Message ids the current selection acts on. A conversation row expands to
     /// its messages in the same mailbox, as in Apple Mail.
     pub fn selected_ids(&self) -> Vec<MessageId> {
@@ -468,7 +478,11 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
         }
         Event::MailboxesChanged => ui.schedule_sidebar(),
         Event::MessagesChanged(_) => ui.schedule_reload(),
-        Event::BodyReady(id) => ui.viewer.body_ready(ui, id),
+        Event::BodyReady(id) => {
+            for v in ui.viewers() {
+                v.body_ready(ui, id);
+            }
+        }
         Event::SyncStarted(_) => ui.set_busy(1),
         Event::SyncFinished(_) => ui.set_busy(-1),
         Event::NewMail { from, subject, id, .. } => {
@@ -511,6 +525,25 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
                 .unwrap_or_default();
             ui.toast(&format!("{prefix}{message}"));
         }
+        Event::Unsubscribed { url, result } => match result {
+            Ok(()) => ui.toast("Unsubscribed. It can take the sender a few days to stop."),
+            Err(e) => {
+                tracing::warn!("one-click unsubscribe failed: {e}");
+                // Their page is the way left; the same link usually works in a browser.
+                let t = adw::Toast::builder()
+                    .title(glib::markup_escape_text(&format!("Couldn’t unsubscribe: {e}")))
+                    .button_label("Open Website")
+                    .timeout(10)
+                    .build();
+                let weak = Rc::downgrade(ui);
+                t.connect_button_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        gtk::UriLauncher::new(&url).launch(Some(&ui.window), gio::Cancellable::NONE, |_| {});
+                    }
+                });
+                ui.toasts.add_toast(t);
+            }
+        },
         Event::SignInFailed { account, message } => {
             let name = ui.account_for(account).map(|a| a.identity.email).unwrap_or_default();
             ui.toast_sign_in(account, &format!("Couldn’t sign in to {name}: {message}"));
@@ -553,6 +586,10 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("toggle-read", Box::new(toggle_read));
     simple("toggle-flag", Box::new(toggle_flag));
     simple("search", Box::new(|ui| ui.list.focus_search()));
+    simple("open-window", Box::new(|ui| match ui.viewer.current() {
+        Some(id) => crate::message_window::open(ui, id),
+        None => ui.toast("Select a message first"),
+    }));
     simple("next-message", Box::new(|ui| crate::message_list::step(ui, 1)));
     simple("previous-message", Box::new(|ui| crate::message_list::step(ui, -1)));
     simple("add-account", Box::new(accounts::open));
@@ -573,6 +610,8 @@ fn install_actions(ui: &Rc<Ui>) {
             .build();
         about.present(Some(&ui.window));
     }));
+
+    crate::message_window::install_view_actions(ui, win, &ui.viewer);
 
     // Flag colour: win.flag('red'|...|'none')
     let flag = gio::SimpleAction::new("flag", Some(glib::VariantTy::STRING));
