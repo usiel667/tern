@@ -6,11 +6,16 @@ pkgdesc="Apple Mail-style email client for Linux (GTK4 + libadwaita)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/usiel667/tern"
 license=('GPL-3.0-or-later')
-depends=('gtk4' 'libadwaita' 'webkitgtk-6.0' 'hicolor-icon-theme')
+depends=('gtk4' 'libadwaita' 'webkitgtk-6.0' 'hicolor-icon-theme'
+         'glib2' 'gdk-pixbuf2' 'pango' 'cairo' 'graphene' 'glibc' 'libgcc')
 optdepends=('gnome-keyring: store account passwords'
             'keepassxc: alternative Secret Service provider')
 makedepends=('cargo' 'git')
-provides=('tern')
+# makepkg's LTO builds the C in aws-lc-rs (via reqwest's rustls) as LTO objects that
+# Rust's linker can't use: undefined aws_lc_* symbols in a clean chroot (2026-11-17).
+options=('!lto')
+# Not provides=('tern'): the AUR's "tern" is an unrelated PostgreSQL migration tool. Both
+# install /usr/bin/tern, hence the conflict.
 conflicts=('tern')
 source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')
