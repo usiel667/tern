@@ -86,12 +86,12 @@ impl Viewer {
         crate::app::same_toolbar_height(&header);
         header.set_show_title(false);
         header.pack_start(&header_button("tern-archive-symbolic", "Archive (Ctrl+Alt+A)", "win.archive"));
-        header.pack_start(&header_button("user-trash-symbolic", "Delete (Delete)", "win.delete"));
-        header.pack_start(&header_button("mail-mark-junk-symbolic", "Junk (Ctrl+Shift+J)", "win.junk"));
-        header.pack_end(&header_button("mail-forward-symbolic", "Forward (Ctrl+Shift+F)", "win.forward"));
-        header.pack_end(&header_button("mail-reply-all-symbolic", "Reply All (Ctrl+Shift+R)", "win.reply-all"));
-        header.pack_end(&header_button("mail-reply-sender-symbolic", "Reply (Ctrl+R)", "win.reply"));
-        header.pack_end(&header_button("starred-symbolic", "Flag (Ctrl+Shift+L)", "win.toggle-flag"));
+        header.pack_start(&header_button("tern-user-trash-symbolic", "Delete (Delete)", "win.delete"));
+        header.pack_start(&header_button("tern-mail-mark-junk-symbolic", "Junk (Ctrl+Shift+J)", "win.junk"));
+        header.pack_end(&header_button("tern-mail-forward-symbolic", "Forward (Ctrl+Shift+F)", "win.forward"));
+        header.pack_end(&header_button("tern-mail-reply-all-symbolic", "Reply All (Ctrl+Shift+R)", "win.reply-all"));
+        header.pack_end(&header_button("tern-mail-reply-sender-symbolic", "Reply (Ctrl+R)", "win.reply"));
+        header.pack_end(&header_button("tern-starred-symbolic", "Flag (Ctrl+Shift+L)", "win.toggle-flag"));
         let colors_btn = gtk::Button::builder().icon_name("tern-sun-symbolic").visible(false).build();
         header.pack_end(&colors_btn);
         let menu = gio::Menu::new();
@@ -101,7 +101,7 @@ impl Viewer {
         menu.append(Some("Print…"), Some("win.print"));
         menu.append(Some("Save As…"), Some("win.save-message"));
         menu.append(Some("View Source"), Some("win.view-source"));
-        let more = gtk::MenuButton::builder().icon_name("view-more-symbolic").tooltip_text("More").menu_model(&menu).build();
+        let more = gtk::MenuButton::builder().icon_name("tern-view-more-symbolic").tooltip_text("More").menu_model(&menu).build();
         header.pack_end(&more);
 
         let avatar = adw::Avatar::new(44, None, true);
@@ -189,7 +189,7 @@ impl Viewer {
         content.append(&webview);
 
         let status = adw::StatusPage::builder()
-            .icon_name("mail-read-symbolic")
+            .icon_name("tern-mail-read-symbolic")
             .title("No Message Selected")
             .build();
 
@@ -434,7 +434,7 @@ impl Viewer {
         for (i, a) in body.attachments.iter().enumerate().filter(|(i, _)| !rendered.placed.contains(i)) {
             let name = a.filename.clone().unwrap_or_else(|| format!("attachment-{}", i + 1));
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
+            chip.append(&gtk::Image::from_icon_name("tern-mail-attachment-symbolic"));
             chip.append(&gtk::Label::new(Some(&format!("{name}  ·  {}", human_size(a.size)))));
             let btn = gtk::Button::builder().child(&chip).css_classes(["attachment-chip"]).build();
             let (weak, me, raw) = (Rc::downgrade(ui), self.me.clone(), body.raw.clone());
@@ -474,7 +474,7 @@ impl Viewer {
                 .css_classes(["dim-label"])
                 .build());
             if t.id == m.id {
-                row.add_prefix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                row.add_prefix(&gtk::Image::from_icon_name("tern-go-next-symbolic"));
             }
             let (weak, me, id) = (Rc::downgrade(ui), self.me.clone(), t.id);
             row.connect_activated(move |_| {

@@ -71,15 +71,15 @@ impl MailboxRole {
     pub fn icon_name(self) -> &'static str {
         match self {
             Self::Inbox => "tern-inbox-symbolic",
-            Self::Drafts => "document-edit-symbolic",
-            Self::Sent => "mail-send-symbolic",
-            Self::Junk => "mail-mark-junk-symbolic",
-            Self::Trash => "user-trash-symbolic",
+            Self::Drafts => "tern-document-edit-symbolic",
+            Self::Sent => "tern-mail-send-symbolic",
+            Self::Junk => "tern-mail-mark-junk-symbolic",
+            Self::Trash => "tern-user-trash-symbolic",
             Self::Archive => "tern-archive-symbolic",
             Self::All => "tern-inbox-symbolic",
-            Self::Flagged => "starred-symbolic",
-            Self::Important => "emblem-important-symbolic",
-            Self::Custom => "folder-symbolic",
+            Self::Flagged => "tern-starred-symbolic",
+            Self::Important => "tern-emblem-important-symbolic",
+            Self::Custom => "tern-folder-symbolic",
         }
     }
 

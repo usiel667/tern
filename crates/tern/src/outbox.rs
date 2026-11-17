@@ -98,9 +98,9 @@ fn row(ui: &Rc<Ui>, dialog: &adw::Dialog, item: OutboxItem) -> adw::ActionRow {
             .css_classes(["flat"])
             .build()
     };
-    let edit = button("document-edit-symbolic", "Edit");
-    let retry = button("view-refresh-symbolic", "Try Again");
-    let delete = button("user-trash-symbolic", "Delete");
+    let edit = button("tern-document-edit-symbolic", "Edit");
+    let retry = button("tern-view-refresh-symbolic", "Try Again");
+    let delete = button("tern-user-trash-symbolic", "Delete");
     edit.set_sensitive(draft.is_some());
     let id = item.id;
     {

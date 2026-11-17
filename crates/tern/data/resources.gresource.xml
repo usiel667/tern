@@ -6,6 +6,36 @@
     <file preprocess="xml-stripblanks" alias="tern-sidebar-symbolic.svg">icons/tern-sidebar-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="tern-sun-symbolic.svg">icons/tern-sun-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="tern-moon-symbolic.svg">icons/tern-moon-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-avatar-default-symbolic.svg">icons/tern-avatar-default-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-document-edit-symbolic.svg">icons/tern-document-edit-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-document-save-symbolic.svg">icons/tern-document-save-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-edit-undo-symbolic.svg">icons/tern-edit-undo-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-go-down-symbolic.svg">icons/tern-go-down-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-go-next-symbolic.svg">icons/tern-go-next-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-input-keyboard-symbolic.svg">icons/tern-input-keyboard-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-attachment-symbolic.svg">icons/tern-mail-attachment-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-forward-symbolic.svg">icons/tern-mail-forward-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-mark-junk-symbolic.svg">icons/tern-mail-mark-junk-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-message-new-symbolic.svg">icons/tern-mail-message-new-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-read-symbolic.svg">icons/tern-mail-read-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-replied-symbolic.svg">icons/tern-mail-replied-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-reply-all-symbolic.svg">icons/tern-mail-reply-all-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-reply-sender-symbolic.svg">icons/tern-mail-reply-sender-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-send-receive-symbolic.svg">icons/tern-mail-send-receive-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-send-symbolic.svg">icons/tern-mail-send-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-mail-unread-symbolic.svg">icons/tern-mail-unread-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-open-menu-symbolic.svg">icons/tern-open-menu-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-preferences-desktop-appearance-symbolic.svg">icons/tern-preferences-desktop-appearance-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-starred-symbolic.svg">icons/tern-starred-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-user-trash-symbolic.svg">icons/tern-user-trash-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-view-more-symbolic.svg">icons/tern-view-more-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-view-refresh-symbolic.svg">icons/tern-view-refresh-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-view-reveal-symbolic.svg">icons/tern-view-reveal-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-weather-overcast-symbolic.svg">icons/tern-weather-overcast-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-web-browser-symbolic.svg">icons/tern-web-browser-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-window-close-symbolic.svg">icons/tern-window-close-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-emblem-important-symbolic.svg">icons/tern-emblem-important-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="tern-folder-symbolic.svg">icons/tern-folder-symbolic.svg</file>
   </gresource>
   <gresource prefix="/dev/tern/Tern">
     <file>style.css</file>

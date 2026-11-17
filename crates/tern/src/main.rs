@@ -117,3 +117,35 @@ fn main() -> gtk::glib::ExitCode {
     });
     app.run_with_args(&gtk_args)
 }
+
+#[cfg(test)]
+mod icon_tests {
+    /// Every icon the code names is one of Tern's bundled `tern-*` icons (so the desktop's
+    /// icon theme can't swap it, see data/icons/README.md), and is listed in the resources.
+    #[test]
+    fn every_icon_is_bundled() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let resources = std::fs::read_to_string(dir.join("data/resources.gresource.xml")).unwrap();
+        let mut seen = 0;
+        // The app, plus tern-core's mailbox-role icons.
+        let files = std::fs::read_dir(dir.join("src")).unwrap().map(|e| e.unwrap().path());
+        for path in files.chain([dir.join("../tern-core/src/model.rs")]) {
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let code = std::fs::read_to_string(&path).unwrap();
+            for name in code.split('"').filter(|s| {
+                s.len() > "-symbolic".len()
+                    && s.ends_with("-symbolic")
+                    && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            }) {
+                let file = format!("{name}.svg");
+                assert!(name.starts_with("tern-"), "{}: \"{name}\" comes from the desktop's icon theme", path.display());
+                assert!(dir.join("data/icons").join(&file).exists(), "{name}: no data/icons/{file}");
+                assert!(resources.contains(&format!("alias=\"{file}\"")), "{name}: not in resources.gresource.xml");
+                seen += 1;
+            }
+        }
+        assert!(seen > 30, "found the icon names ({seen})");
+    }
+}

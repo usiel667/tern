@@ -19,7 +19,7 @@ const PAIR_WINDOW: Duration = Duration::from_millis(1000);
 type Refreshers = Rc<RefCell<Vec<Box<dyn Fn()>>>>;
 
 pub fn page(ui: &Rc<Ui>) -> adw::PreferencesPage {
-    let page = adw::PreferencesPage::builder().title("Keyboard").icon_name("input-keyboard-symbolic").build();
+    let page = adw::PreferencesPage::builder().title("Keyboard").icon_name("tern-input-keyboard-symbolic").build();
 
     let vim_group = adw::PreferencesGroup::new();
     let vim = adw::SwitchRow::builder()
@@ -106,7 +106,7 @@ fn row(ui: &Rc<Ui>, sc: &'static Shortcut, refreshers: &Refreshers) -> adw::Acti
     let row = adw::ActionRow::builder().title(sc.title).activatable(true).build();
     let keys_box = gtk::Box::builder().spacing(12).valign(gtk::Align::Center).build();
     let reset = gtk::Button::builder()
-        .icon_name("edit-undo-symbolic")
+        .icon_name("tern-edit-undo-symbolic")
         .tooltip_text("Use the default")
         .css_classes(["flat"])
         .valign(gtk::Align::Center)

@@ -10,7 +10,7 @@ use tern_sync::Command;
 use crate::app::Ui;
 
 pub fn page(ui: &Rc<Ui>) -> adw::PreferencesPage {
-    let page = adw::PreferencesPage::builder().title("Appearance").icon_name("preferences-desktop-appearance-symbolic").build();
+    let page = adw::PreferencesPage::builder().title("Appearance").icon_name("tern-preferences-desktop-appearance-symbolic").build();
     let group = adw::PreferencesGroup::builder()
         .title("Theme")
         .description("Colors for all of Tern: the window, messages and New Message. System follows your desktop's light or dark mode.")

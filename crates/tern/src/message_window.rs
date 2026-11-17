@@ -223,7 +223,7 @@ pub fn view_source(ui: &Rc<Ui>, v: &Rc<Viewer>) {
     let header = adw::HeaderBar::builder()
         .title_widget(&adw::WindowTitle::new("Message Source", &subject))
         .build();
-    let save = gtk::Button::builder().icon_name("document-save-symbolic").tooltip_text("Save As…").build();
+    let save = gtk::Button::builder().icon_name("tern-document-save-symbolic").tooltip_text("Save As…").build();
     header.pack_start(&save);
     let content = adw::ToolbarView::new();
     content.add_top_bar(&header);

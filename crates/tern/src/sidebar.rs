@@ -59,7 +59,7 @@ impl Sidebar {
         about.append(Some("Quit"), Some("app.quit"));
         menu.append_section(None, &about);
         let menu_btn = gtk::MenuButton::builder()
-            .icon_name("open-menu-symbolic")
+            .icon_name("tern-open-menu-symbolic")
             .menu_model(&menu)
             .primary(true)
             .tooltip_text("Main Menu")
@@ -107,12 +107,12 @@ impl Sidebar {
 
         self.section("Favorites");
         self.item(0, "tern-inbox-symbolic", "All Inboxes", sum(MailboxRole::Inbox, true), Some(ListScope::Role(MailboxRole::Inbox)), None);
-        self.item(0, "starred-symbolic", "Flagged", flagged, Some(ListScope::Flagged), None);
-        self.item(0, "document-edit-symbolic", "Drafts", sum(MailboxRole::Drafts, false), Some(ListScope::Role(MailboxRole::Drafts)), None);
-        self.item(0, "mail-send-symbolic", "Sent", 0, Some(ListScope::Role(MailboxRole::Sent)), None);
+        self.item(0, "tern-starred-symbolic", "Flagged", flagged, Some(ListScope::Flagged), None);
+        self.item(0, "tern-document-edit-symbolic", "Drafts", sum(MailboxRole::Drafts, false), Some(ListScope::Role(MailboxRole::Drafts)), None);
+        self.item(0, "tern-mail-send-symbolic", "Sent", 0, Some(ListScope::Role(MailboxRole::Sent)), None);
 
         self.section("Smart Mailboxes");
-        self.item(0, "mail-unread-symbolic", "Unread", unread_total, Some(ListScope::Unread), None);
+        self.item(0, "tern-mail-unread-symbolic", "Unread", unread_total, Some(ListScope::Unread), None);
 
         let accounts = ui.accounts.borrow().clone();
         let mut by_account: HashMap<_, Vec<&Mailbox>> = HashMap::new();
@@ -223,7 +223,7 @@ impl Sidebar {
             .css_classes(["sidebar-section", "account-section"])
             .build();
         // Thin chevrons, like Obsidian's folder tree.
-        let (icon, tip) = if collapsed { ("go-next-symbolic", "Show") } else { ("go-down-symbolic", "Hide") };
+        let (icon, tip) = if collapsed { ("tern-go-next-symbolic", "Show") } else { ("tern-go-down-symbolic", "Hide") };
         let toggle = gtk::Button::builder()
             .icon_name(icon)
             .tooltip_text(tip)

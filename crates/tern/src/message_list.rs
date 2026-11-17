@@ -95,7 +95,7 @@ impl MessageList {
             .css_classes(["pill", "suggested-action"])
             .build();
         let welcome = adw::StatusPage::builder()
-            .icon_name("mail-send-receive-symbolic")
+            .icon_name("tern-mail-send-receive-symbolic")
             .title("Welcome to Tern")
             .description("Add an iCloud, Google, Fastmail or other IMAP account to get started.")
             .child(&welcome_btn)
@@ -126,7 +126,7 @@ impl MessageList {
             .build();
         header.pack_start(&sidebar_btn);
         let sync_btn = gtk::Button::builder()
-            .icon_name("mail-send-receive-symbolic")
+            .icon_name("tern-mail-send-receive-symbolic")
             .tooltip_text("Get Mail (Ctrl+Shift+N)")
             .action_name("win.get-mail")
             .build();
@@ -135,12 +135,12 @@ impl MessageList {
         header.pack_start(&spinner);
 
         let compose = gtk::Button::builder()
-            .icon_name("mail-message-new-symbolic")
+            .icon_name("tern-mail-message-new-symbolic")
             .tooltip_text("New Message (Ctrl+N)")
             .action_name("win.compose")
             .build();
         let unread_btn = gtk::ToggleButton::builder()
-            .icon_name("mail-unread-symbolic")
+            .icon_name("tern-mail-unread-symbolic")
             .tooltip_text("Show Only Unread")
             .build();
         header.pack_end(&compose);
@@ -412,7 +412,7 @@ fn build_row() -> (gtk::Box, RowWidgets) {
     let date = lbl(&["date"], false);
     let count = lbl(&["thread-count"], false);
     count.set_valign(gtk::Align::Center);
-    let replied = gtk::Image::from_icon_name("mail-replied-symbolic");
+    let replied = gtk::Image::from_icon_name("tern-mail-replied-symbolic");
     replied.add_css_class("dim-label");
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     top.append(&replied);
@@ -422,7 +422,7 @@ fn build_row() -> (gtk::Box, RowWidgets) {
 
     let subject = lbl(&["subject"], true);
     subject.set_hexpand(true);
-    let attachment = gtk::Image::from_icon_name("mail-attachment-symbolic");
+    let attachment = gtk::Image::from_icon_name("tern-mail-attachment-symbolic");
     attachment.add_css_class("dim-label");
     let flag = gtk::Box::builder().valign(gtk::Align::Center).css_classes(["flag-dot"]).build();
     let mid = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -470,9 +470,9 @@ fn bind_row(w: &RowWidgets, m: &MessageSummary, conversations: bool) {
     w.attachment.set_visible(e.has_attachments);
     w.replied.set_visible(e.flags.answered || e.flags.forwarded);
     if e.flags.forwarded && !e.flags.answered {
-        w.replied.set_icon_name(Some("mail-forward-symbolic"));
+        w.replied.set_icon_name(Some("tern-mail-forward-symbolic"));
     } else {
-        w.replied.set_icon_name(Some("mail-replied-symbolic"));
+        w.replied.set_icon_name(Some("tern-mail-replied-symbolic"));
     }
     for c in tern_core::model::FlagColor::ALL {
         w.flag.remove_css_class(c.css_class());
@@ -582,7 +582,7 @@ pub fn connect(ui: &Rc<Ui>) {
                 Some(gdk::ContentProvider::for_value(&format!("tern-msgs:{}", ids.join(",")).to_value()))
             });
             drag.connect_drag_begin(|src, _| {
-                let icon = gtk::Image::from_icon_name("mail-message-new-symbolic");
+                let icon = gtk::Image::from_icon_name("tern-mail-message-new-symbolic");
                 icon.set_pixel_size(32);
                 src.set_icon(Some(&gtk::WidgetPaintable::new(Some(&icon))), 16, 16);
             });

@@ -604,7 +604,7 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("about", Box::new(|ui| {
         let about = adw::AboutDialog::builder()
             .application_name("Tern")
-            .application_icon("mail-unread-symbolic")
+            .application_icon("tern-mail-unread-symbolic")
             .version(env!("CARGO_PKG_VERSION"))
             .comments("An Apple Mail-style email client for Linux")
             .license_type(gtk::License::Gpl30)

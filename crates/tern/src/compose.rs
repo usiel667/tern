@@ -332,12 +332,12 @@ fn open(
     content.append(&vim_status);
 
     let send = gtk::Button::builder()
-        .icon_name("mail-send-symbolic")
+        .icon_name("tern-mail-send-symbolic")
         .tooltip_text("Send (Ctrl+Return)")
         .css_classes(["suggested-action"])
         .build();
     let attach = gtk::Button::builder()
-        .icon_name("mail-attachment-symbolic")
+        .icon_name("tern-mail-attachment-symbolic")
         .tooltip_text("Attach Files… (Shift+Ctrl+A)")
         .build();
     let bcc_toggle = gtk::ToggleButton::builder().label("Bcc").active(!draft.bcc.is_empty()).build();
@@ -648,7 +648,7 @@ fn refresh_attachments(c: &Rc<Compose>) {
     for (i, a) in c.attachments.borrow().iter().enumerate() {
         let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         chip.add_css_class("attachment-chip");
-        chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
+        chip.append(&gtk::Image::from_icon_name("tern-mail-attachment-symbolic"));
         chip.append(&gtk::Label::new(Some(&a.filename)));
         chip.append(
             &gtk::Label::builder()
@@ -657,7 +657,7 @@ fn refresh_attachments(c: &Rc<Compose>) {
                 .build(),
         );
         let remove = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
+            .icon_name("tern-window-close-symbolic")
             .tooltip_text("Remove")
             .css_classes(["flat", "circular"])
             .build();

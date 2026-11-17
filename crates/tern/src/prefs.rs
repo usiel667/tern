@@ -73,7 +73,7 @@ fn provider_label(p: Provider) -> &'static str {
 
 /// Each account's names (editable), address and type, with Sign In Again and Remove.
 fn accounts_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) -> adw::PreferencesPage {
-    let page = adw::PreferencesPage::builder().title("Accounts").icon_name("avatar-default-symbolic").build();
+    let page = adw::PreferencesPage::builder().title("Accounts").icon_name("tern-avatar-default-symbolic").build();
     let group = adw::PreferencesGroup::new();
     let add = gtk::Button::builder().label("Add Account…").css_classes(["flat"]).build();
     {
@@ -150,7 +150,7 @@ fn accounts_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) -> adw::Preferenc
 
 /// App-wide switches for reading mail. Each takes effect at once on the open message.
 fn viewing_page(ui: &Rc<Ui>) -> adw::PreferencesPage {
-    let page = adw::PreferencesPage::builder().title("Viewing").icon_name("view-reveal-symbolic").build();
+    let page = adw::PreferencesPage::builder().title("Viewing").icon_name("tern-view-reveal-symbolic").build();
     let s = ui.settings.borrow().clone();
     let messages = adw::PreferencesGroup::builder().title("Messages").build();
     let remote = adw::SwitchRow::builder()
@@ -219,7 +219,7 @@ fn confirm_remove(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog, from: &gtk::Butt
 
 /// The chosen account's signature, with a switch to turn it off.
 fn signatures_page(ui: &Rc<Ui>, dialog: &adw::PreferencesDialog) -> adw::PreferencesPage {
-    let page = adw::PreferencesPage::builder().title("Signatures").icon_name("document-edit-symbolic").build();
+    let page = adw::PreferencesPage::builder().title("Signatures").icon_name("tern-document-edit-symbolic").build();
     let group = adw::PreferencesGroup::builder()
         .description("Added to new messages, below what you write and above any quoted text.")
         .build();

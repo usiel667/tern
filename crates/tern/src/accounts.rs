@@ -32,14 +32,14 @@ pub fn open(ui: &Rc<Ui>) {
         "Uses an app password"
     };
     for (provider, title, subtitle, icon) in [
-        (Provider::ICloud, "iCloud", "Uses an app-specific password", "weather-overcast-symbolic"),
-        (Provider::Gmail, "Google", google, "web-browser-symbolic"),
-        (Provider::Fastmail, "Fastmail", "Uses a JMAP API token", "mail-send-receive-symbolic"),
-        (Provider::Generic, "Other Mail Account…", "IMAP and SMTP", "mail-unread-symbolic"),
+        (Provider::ICloud, "iCloud", "Uses an app-specific password", "tern-weather-overcast-symbolic"),
+        (Provider::Gmail, "Google", google, "tern-web-browser-symbolic"),
+        (Provider::Fastmail, "Fastmail", "Uses a JMAP API token", "tern-mail-send-receive-symbolic"),
+        (Provider::Generic, "Other Mail Account…", "IMAP and SMTP", "tern-mail-unread-symbolic"),
     ] {
         let row = adw::ActionRow::builder().title(title).subtitle(subtitle).activatable(true).build();
         row.add_prefix(&gtk::Image::from_icon_name(icon));
-        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        row.add_suffix(&gtk::Image::from_icon_name("tern-go-next-symbolic"));
         let (nav2, ui2, dialog2) = (nav.clone(), ui.clone(), dialog.clone());
         row.connect_activated(move |_| nav2.push(&form_page(&ui2, &dialog2, provider, title)));
         group.add(&row);
