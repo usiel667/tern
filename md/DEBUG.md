@@ -21,6 +21,44 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-17 — First run on a clean Fedora 45 KDE Plasma VM (beta portability test)
+
+Test machine: Fedora 45 KDE Plasma 6.8.1 on Wayland (KWin), Plasma Login Manager (not SDDM),
+**ksecretd** as the Secret Service (KDE's own, unlocked at login by pam_kwallet), Breeze icons,
+xdg-desktop-portal-kde. No GPU. Same Tern commit as the GNOME run plus ccfd6af. Mail: Dovecot +
+Postfix in the VM with a private-CA certificate (`~/VMs/tern/setup-test-mail.sh`). VM:
+`~/VMs/tern/fedora-kde/vm.sh` (ssh 2223).
+
+Worked: build (2m18s, no warnings); first launch shows the welcome view; Add Account → Other →
+"Trust This Certificate?" (fingerprint matches openssl) → sync, folder roles; password stored by
+ksecretd without any prompt, nothing in accounts.toml; HTML message; attachment **Open** (KDE
+portal → LibreOffice) and **Save…** (KDE's own file dialog, name filled in, file correct);
+pinned SMTP send over STARTTLS 587; restart reads the password back; new mail arrives live;
+new-mail **notification** shows when the window isn't active; **dark mode**: Plasma's Breeze
+Dark reaches Tern through the portal and the System theme switches live. Clicking in the empty
+New Message body focuses it (so GNOME finding 9 was the VM's first click focusing the window).
+
+Open:
+1. **Breeze icons replace Adwaita's** (GTK follows the desktop's icon theme): the welcome
+   picture becomes an inbox-download tray, the Google row gets a red no-entry-like icon (reads
+   as an error), several toolbar icons change shape. Ship Tern's own symbolic icons for the
+   ones that matter, or set Adwaita as the icon theme for Tern's windows.
+2. **Clicking the new-mail notification does nothing** (window not raised, message not
+   selected). The notification is also titled "tern" with no icon. Likely both from the
+   missing .desktop file / app icon (Plasma can't map dev.tern.Tern to an app); re-test once
+   the packaging installs them.
+3. **Counts lag behind the list**: after a pushed message the header said "5 messages, 1
+   unread" with 6 rows and 2 unread dots; after sending, Drafts kept "1" until opened (server
+   Drafts was empty). They settle on the next update, so a missed MailboxesChanged somewhere
+   (not KDE-specific).
+4. Taskbar shows a generic Wayland "W" icon (same packaging gap as GNOME finding 6).
+5. VM setup notes: Fedora 45 KDE boots into Plasma Setup (first-run wizard) unless
+   `/etc/plasma-setup-done` exists; a mirror once cut the 890 MB installer image short, so
+   `vm.sh install` now serves a locally downloaded, checksum-verified `install.img`.
+
+Not tested on KDE: changed-certificate dialog (tested on GNOME, same code), mailto handler
+(needs the .desktop file), print.
+
 ## 2026-11-16 — First run on a clean Fedora 45 GNOME VM (beta portability test)
 
 Test machine: Fedora 45 Workstation, GNOME 51 on Wayland, GTK 4.24.1, libadwaita 1.10,
