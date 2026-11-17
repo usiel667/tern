@@ -34,12 +34,13 @@ ksecretd through `--talk-name=org.freedesktop.secrets`, sync, search, notificati
 data lives in `~/.var/app/dev.tern.Tern`.
 
 Open:
-1. **First open of an uncached message with attachments clips the attachment row**: the
-   header is laid out before the body (and its attachments) arrives and doesn't grow, so
-   only the chip's top edge shows; opening the message again is fine. Not Flatpak-specific
-   (it showed there because nothing was cached yet).
-2. Inside the sandbox `sans-serif` is DejaVu Sans (the runtime's default), not the desktop's
-   Noto Sans, so Tern's text looks different from native apps.
+1. ✅ (2026-11-17) **The attachment row was cut off** when a message with attachments came
+   right after one without: the hidden row was filled, then shown, and came back only as
+   tall as its margin. Not about caching after all; reproduced in the demo. Shown first now.
+2. ✅ (2026-11-17) **Plain-text mail used the runtime's font** in the sandbox (`sans-serif` is
+   DejaVu/Cantarell there, the desktop's Noto Sans elsewhere). Messages now try the
+   desktop's interface font (GTK's font setting) first; the host's fonts are visible inside
+   the Flatpak, so it matches the rest of Tern. HTML mail keeps its own fonts.
 3. The notification stays on screen after it's clicked (portal path).
 4. Not tried in the Flatpak yet: attachment Open/Save, sending, print, mailto.
 

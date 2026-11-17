@@ -111,21 +111,27 @@ pub struct RenderedBody {
 
 /// The colours a message is shown in: the theme's (Settings → Appearance) or plain Adwaita's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Look {
+pub struct Look<'a> {
     pub dark: bool,
     /// Behind the message (the window colour, so it never flashes another one).
     pub bg: &'static str,
     pub fg: &'static str,
     pub quote: &'static str,
     pub link: &'static str,
+    /// The desktop's interface font family ("Noto Sans"), tried first for plain-text mail so
+    /// it matches the rest of Tern; empty: just the usual list. Inside a Flatpak plain
+    /// `sans-serif` is the runtime's DejaVu Sans, not the desktop's font (2026-11-17).
+    pub font: &'a str,
 }
 
-impl Look {
-    pub const LIGHT: Look = Look { dark: false, bg: "#ffffff", fg: "#1c1c1c", quote: "#6b6b6b", link: "#1c71d8" };
-    pub const ADWAITA_DARK: Look = Look { dark: true, bg: "#1e1e1e", fg: "#ffffff", quote: "#9a9a9a", link: "#78aeed" };
+impl Look<'static> {
+    pub const LIGHT: Look<'static> =
+        Look { dark: false, bg: "#ffffff", fg: "#1c1c1c", quote: "#6b6b6b", link: "#1c71d8", font: "" };
+    pub const ADWAITA_DARK: Look<'static> =
+        Look { dark: true, bg: "#1e1e1e", fg: "#ffffff", quote: "#9a9a9a", link: "#78aeed", font: "" };
 
-    pub fn of(p: &'static tern_core::themes::Palette) -> Look {
-        Look { dark: p.dark, bg: p.bg, fg: p.text, quote: p.dim, link: p.accent }
+    pub fn of(p: &'static tern_core::themes::Palette) -> Look<'static> {
+        Look { dark: p.dark, bg: p.bg, fg: p.text, quote: p.dim, link: p.accent, font: "" }
     }
 }
 
@@ -257,6 +263,14 @@ fn attribute_words<'a>(markup: &'a str, name: &str) -> std::collections::HashSet
     words
 }
 
+/// A font family name as a CSS string, keeping only letters, digits, spaces, `-` and `_`
+/// (it ends up in the page's stylesheet); `None` when nothing is left.
+fn css_font(family: &str) -> Option<String> {
+    let clean: String = family.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_')).collect();
+    let clean = clean.trim();
+    (!clean.is_empty()).then(|| format!("'{clean}'"))
+}
+
 /// Build a locked-down HTML document for a message body.
 ///
 /// * A Content-Security-Policy blocks every network load unless `allow_remote`
@@ -287,10 +301,11 @@ pub fn render_body_with(
     };
     let (fg, bg, quote, link, dark) = (look.fg, look.bg, look.quote, look.link, look.dark);
     let base_css = format!(
-        "html{{color-scheme:{scheme}}}body{{font:15px/1.5 -apple-system,'Inter','Cantarell',system-ui,sans-serif;\
+        "html{{color-scheme:{scheme}}}body{{font:15px/1.5 {first}-apple-system,'Inter','Cantarell',system-ui,sans-serif;\
          margin:16px 24px;word-wrap:break-word;font-feature-settings:'calt' 0;}}img{{max-width:100%;height:auto}}\
          .tern-picture{{margin:12px 0;white-space:normal}}.tern-picture img{{border-radius:6px}}",
-        scheme = if dark { "dark" } else { "light" }
+        scheme = if dark { "dark" } else { "light" },
+        first = css_font(look.font).map(|f| format!("{f},")).unwrap_or_default()
     );
 
     match &body.html {
@@ -537,7 +552,18 @@ pub fn move_next_to<T: PartialEq + Clone>(items: &[T], moved: &T, target: &T, af
 mod tests {
     use super::*;
 
-    fn tokyo() -> Look {
+    #[test]
+    fn plain_text_uses_the_desktop_font_first() {
+        let b = body(Some("hello"), None);
+        let look = Look { font: "Noto Sans", ..Look::LIGHT };
+        assert!(render_body(&b, false, &look, false).html.contains("font:15px/1.5 'Noto Sans',-apple-system,"));
+        // No font: just the list. Anything but a name is dropped (it lands in the CSS).
+        assert!(render_body(&b, false, &Look::LIGHT, false).html.contains("font:15px/1.5 -apple-system,"));
+        let evil = Look { font: "x';}body{display:none", ..Look::LIGHT };
+        assert!(render_body(&b, false, &evil, false).html.contains("font:15px/1.5 'xbodydisplaynone',-apple-system,"));
+    }
+
+    fn tokyo() -> Look<'static> {
         Look::of(tern_core::themes::find("tokyo-night").unwrap())
     }
 

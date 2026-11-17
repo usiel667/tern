@@ -400,11 +400,13 @@ impl Viewer {
         let settings = ui.settings.borrow().clone();
         let allow = settings.load_remote_content || self.allow_remote.borrow().contains(&id);
         let original = self.original_colors.borrow().contains(&id) == settings.darken_html;
-        let look = match crate::app::palette() {
+        let base = match crate::app::palette() {
             Some(p) => crate::format::Look::of(p),
             None if ui.is_dark() => crate::format::Look::ADWAITA_DARK,
             None => crate::format::Look::LIGHT,
         };
+        let font = ui_font_family();
+        let look = crate::format::Look { font: &font, ..base };
         let converted = self.heic_pictures(ui, id, body);
         let rendered = crate::format::render_body_with(body, allow, &look, original, &converted);
         self.remote_banner.set_revealed(rendered.blocked_remote);
@@ -541,6 +543,15 @@ fn save_attachment(ui: &Rc<Ui>, window: &gtk::Window, raw: Vec<u8>, index: u32, 
             None => ui.toast("Attachment not found in message"),
         }
     });
+}
+
+/// The family of the desktop's interface font ("Noto Sans" from "Noto Sans 10"), or "".
+fn ui_font_family() -> String {
+    gtk::Settings::default()
+        .and_then(|s| s.gtk_font_name())
+        .and_then(|name| gtk::pango::FontDescription::from_string(&name).family())
+        .map(|f| f.to_string())
+        .unwrap_or_default()
 }
 
 /// Where opened attachments are put for other apps to read: a folder per open, in Tern's
