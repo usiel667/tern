@@ -21,6 +21,52 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-16 — First run on a clean Fedora 45 GNOME VM (beta portability test)
+
+Test machine: Fedora 45 Workstation, GNOME 51 on Wayland, GTK 4.24.1, libadwaita 1.10,
+WebKitGTK 2.54.2, no GPU (software rendering), Fedora's oo7-daemon as the keyring. Built from
+the repo with Fedora's own Rust 1.99.1 (`cargo build --release --locked`, 2m22s, no warnings).
+Mail server: Dovecot 2.4 inside the VM. VM: `~/VMs/tern/fedora-gnome/vm.sh`.
+
+Worked: build; first launch with no config shows the welcome view; Add Account (Google offers
+an app password, no OAuth); Other Mail Account guesses imap./smtp.<domain>; sign-in, folder
+roles (Drafts/Sent/Junk/Trash/Archive), sync; HTML message; attachment Open through the GNOME
+portal (CSV opened in LibreOffice); password saved only in the keyring, not accounts.toml;
+restart reads it back; new mail arrives live (IDLE).
+
+Fixed 2026-11-17 (each checked on the VM, Dovecot + Postfix with a private-CA certificate):
+1. ✅ **Locked keyring → plain message.** `tern_auth::explain_keyring`: "Your keyring is locked,
+   so Tern can't save or read the password. Unlock it (…), then try again." / "…none is
+   running. Install and start one…". Raw text goes to the log. Seen on the VM by locking the
+   login collection (`secret-tool lock --collection=/org/freedesktop/secrets/collection/login`):
+   oo7 can't prompt at all on Fedora 45, not only under autologin.
+2. ✅ **Certificate errors in plain words** (new crate `tern-tls`): expired / not valid yet /
+   different server name / self-signed / not signed by a trusted authority / revoked.
+   IMAP and SMTP both; lettre's errors are re-described by looking at the certificate again.
+3. ✅ **Trust this certificate.** Add Account checks the IMAP and SMTP certificates; an
+   untrusted one opens "Trust This Certificate?" with which server, the problem and the
+   SHA-256 fingerprint (matches `openssl x509 -fingerprint -sha256`). Trusting pins it per
+   server (`trusted_cert` in accounts.toml; not a secret); the same certificate on the
+   host's other server isn't asked twice. Pinned IMAP sync and SMTP send (STARTTLS 587, AUTH
+   PLAIN) worked; a *different* certificate is refused. lettre can't take a custom verifier,
+   so with a pin Tern does the TLS itself and hands lettre the stream (`connect_with_transport`).
+4. ✅ **Preview keeps HTML block breaks** (`mime::html_text`): "Hi An HTML mail with a link."
+
+Still open:
+5. Keyring entry label `keyring:<uuid>@dev.tern.Tern` (Seahorse shows it). Label "Tern: <email>".
+6. No app icon (generic gear in the dock).
+7. **A trusted certificate that later changes fails silently**: the engine treats it like being
+   offline and retries; the window shows nothing (log: "network error: Tern can't verify the
+   security certificate of …"). Needs an account banner, and a way to trust the new one
+   (Sign In Again reuses the loaded config, so it can't save a new pin; remove + re-add works).
+8. cargo deny now fails on RUSTSEC-2026-0543 "chrono is unmaintained" (new advisory, not from
+   these changes; main fails the same).
+9. Unconfirmed: in the VM a click in the empty New Message body didn't focus it (Tab did);
+   may be the first click only focusing the window. Check on a real desktop.
+10. "beta@localhost" is refused as an address (needs a dot in the domain) — fine for real mail.
+
+Not tested yet: notifications, dark mode on GNOME, mailto handler, file dialogs (Save…), KDE.
+
 ## 2026-11-11 — Photos sent from an iPhone didn't show (and their text was lost)
 
 **Saw:** an email sent from iPhone Mail with 3 photos showed no pictures and no text.

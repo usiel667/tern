@@ -2923,6 +2923,7 @@ dependencies = [
  "tern-smtp",
  "tern-store",
  "tern-sync",
+ "tern-tls",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2965,13 +2966,10 @@ dependencies = [
  "async-imap",
  "async-trait",
  "futures",
- "rustls-native-certs",
  "tern-auth",
  "tern-core",
+ "tern-tls",
  "tokio",
- "tokio-rustls",
- "tracing",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2995,6 +2993,7 @@ dependencies = [
  "mail-parser",
  "tern-auth",
  "tern-core",
+ "tern-tls",
  "tokio",
 ]
 
@@ -3029,6 +3028,18 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "tern-tls"
+version = "0.1.0"
+dependencies = [
+ "rustls-native-certs",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

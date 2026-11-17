@@ -106,29 +106,126 @@ fn build_message(draft: &Draft, as_draft: bool) -> Result<Outgoing> {
 /// The largest message the server accepts, from the `SIZE` it advertises in EHLO (RFC 1870).
 /// Asked without signing in; `None` if the server doesn't say or says 0 (no limit).
 pub async fn size_limit(server: &ServerConfig) -> Result<Option<u64>> {
-    use lettre::transport::smtp::client::{AsyncSmtpConnection, TlsParameters};
     use lettre::transport::smtp::commands::Ehlo;
     use lettre::transport::smtp::extension::ClientId;
 
+    let result = async {
+        let mut conn = connection(server).await?;
+        // lettre keeps only the extensions it knows; ask again to read the raw reply.
+        let reply = conn.command(Ehlo::new(ClientId::default())).await.map_err(|e| Error::Network(e.to_string()))?;
+        let limit = parse_size(reply.message());
+        let _ = conn.quit().await;
+        Ok(limit)
+    }
+    .await;
+    match result {
+        Err(e) => Err(explain_certificate(server, e).await),
+        ok => ok,
+    }
+}
+
+/// How TLS starts with this server.
+fn start(server: &ServerConfig) -> tern_tls::Start {
+    match server.security {
+        Security::Tls => tern_tls::Start::Implicit,
+        Security::StartTls => tern_tls::Start::SmtpStartTls,
+    }
+}
+
+/// An SMTP connection after EHLO. With a trusted certificate Tern does the TLS itself
+/// (tern-tls accepts that certificate) and hands lettre the encrypted stream; otherwise
+/// lettre connects as it always has.
+async fn connection(server: &ServerConfig) -> Result<lettre::transport::smtp::client::AsyncSmtpConnection> {
+    use lettre::transport::smtp::client::{AsyncSmtpConnection, TlsParameters};
+    use lettre::transport::smtp::extension::ClientId;
+
     let id = ClientId::default();
+    let net = |e: lettre::transport::smtp::Error| Error::Network(e.to_string());
+    if let Some(trusted) = server.trusted_cert.as_deref() {
+        let tls = tern_tls::open(&server.host, server.port, start(server), Some(trusted))
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        // lettre reads a greeting first; after STARTTLS the server sends none (RFC 3207).
+        let greeting: &'static [u8] = if server.security == Security::StartTls { b"220 TLS ready\r\n" } else { b"" };
+        let stream = Box::new(Smtps { greeting, at: 0, tls });
+        return AsyncSmtpConnection::connect_with_transport(stream, &id).await.map_err(net);
+    }
     let tls = || TlsParameters::new(server.host.clone()).map_err(|e| Error::Network(e.to_string()));
     let implicit = match server.security {
         Security::Tls => Some(tls()?),
         Security::StartTls => None,
     };
     let timeout = Some(std::time::Duration::from_secs(15));
-    let mut conn =
-        AsyncSmtpConnection::connect_tokio1((server.host.as_str(), server.port), timeout, &id, implicit, None)
-            .await
-            .map_err(|e| Error::Network(e.to_string()))?;
+    let mut conn = AsyncSmtpConnection::connect_tokio1((server.host.as_str(), server.port), timeout, &id, implicit, None)
+        .await
+        .map_err(net)?;
     if server.security == Security::StartTls {
-        conn.starttls(tls()?, &id).await.map_err(|e| Error::Network(e.to_string()))?;
+        conn.starttls(tls()?, &id).await.map_err(net)?;
     }
-    // lettre keeps only the extensions it knows; ask again to read the raw reply.
-    let reply = conn.command(Ehlo::new(id)).await.map_err(|e| Error::Network(e.to_string()))?;
-    let limit = parse_size(reply.message());
-    let _ = conn.quit().await;
-    Ok(limit)
+    Ok(conn)
+}
+
+/// A TLS stream from tern-tls for lettre, with a made-up greeting in front after STARTTLS.
+#[derive(Debug)]
+struct Smtps {
+    greeting: &'static [u8],
+    at: usize,
+    tls: tern_tls::Stream,
+}
+
+impl tokio::io::AsyncRead for Smtps {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = self.get_mut();
+        if me.at < me.greeting.len() {
+            let n = buf.remaining().min(me.greeting.len() - me.at);
+            buf.put_slice(&me.greeting[me.at..me.at + n]);
+            me.at += n;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut me.tls).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Smtps {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().tls).poll_write(cx, buf)
+    }
+    fn poll_flush(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().tls).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().tls).poll_shutdown(cx)
+    }
+}
+
+impl lettre::transport::smtp::client::AsyncTokioStream for Smtps {
+    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.tls.get_ref().0.peer_addr()
+    }
+}
+
+/// lettre reports certificate problems in rustls's words; look at the certificate again and
+/// say what's wrong in plain words instead.
+async fn explain_certificate(server: &ServerConfig, e: Error) -> Error {
+    let Error::Network(text) = &e else { return e };
+    if server.trusted_cert.is_some() || !text.to_ascii_lowercase().contains("certificate") {
+        return e;
+    }
+    match tern_tls::probe(&server.host, server.port, start(server), None).await {
+        Err(tern_tls::ConnectError::Untrusted(u)) => Error::Network(u.to_string()),
+        _ => e,
+    }
 }
 
 /// `SIZE n` from EHLO reply lines; 0 means "no fixed limit".
@@ -151,28 +248,44 @@ fn classify(code: Option<u16>, text: String) -> Error {
 }
 
 pub async fn send(server: &ServerConfig, cred: &Credential, out: &Outgoing) -> Result<()> {
-    let builder = match server.security {
-        Security::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&server.host),
-        Security::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&server.host),
-    }
-    .map_err(|e| Error::Network(e.to_string()))?
-    .port(server.port);
-
-    let builder = match cred {
+    let (credentials, mechanisms) = match cred {
         Credential::Password { username, password } => {
-            builder.credentials(Credentials::new(username.clone(), password.clone()))
+            (Credentials::new(username.clone(), password.clone()), vec![Mechanism::Plain, Mechanism::Login])
         }
-        Credential::OAuth2 { username, access_token } => builder
-            .credentials(Credentials::new(username.clone(), access_token.clone()))
-            .authentication(vec![Mechanism::Xoauth2]),
+        Credential::OAuth2 { username, access_token } => {
+            (Credentials::new(username.clone(), access_token.clone()), vec![Mechanism::Xoauth2])
+        }
         Credential::Bearer { .. } => return Err(Error::Unsupported("bearer tokens over SMTP")),
     };
-    builder
+    let refused = |e: lettre::transport::smtp::Error| classify(e.status().and_then(|c| c.to_string().parse().ok()), e.to_string());
+    let result = if server.trusted_cert.is_some() {
+        async {
+            let mut conn = connection(server).await?;
+            conn.auth(&mechanisms, &credentials).await.map_err(refused)?;
+            conn.send(&out.envelope, &out.raw).await.map_err(refused)?;
+            let _ = conn.quit().await;
+            Ok(())
+        }
+        .await
+    } else {
+        match server.security {
+            Security::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&server.host),
+            Security::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&server.host),
+        }
+        .map_err(|e| Error::Network(e.to_string()))?
+        .port(server.port)
+        .credentials(credentials)
+        .authentication(mechanisms)
         .build()
         .send_raw(&out.envelope, &out.raw)
         .await
-        .map_err(|e| classify(e.status().and_then(|c| c.to_string().parse().ok()), e.to_string()))?;
-    Ok(())
+        .map(|_| ())
+        .map_err(refused)
+    };
+    match result {
+        Err(e) => Err(explain_certificate(server, e).await),
+        ok => ok,
+    }
 }
 
 #[cfg(test)]

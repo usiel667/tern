@@ -1,0 +1,20 @@
+[package]
+name = "tern-tls"
+description = "TLS for Tern's mail connections: certificate checks, plain-words problems, trusted (pinned) certificates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls-native-certs.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

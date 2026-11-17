@@ -4,7 +4,7 @@
 use tern_core::account::{Security, ServerConfig};
 
 async fn probe(host: &str, port: u16, security: Security) -> Option<u64> {
-    let server = ServerConfig { host: host.into(), port, security };
+    let server = ServerConfig { host: host.into(), port, security, trusted_cert: None };
     let limit = tern_smtp::size_limit(&server).await.expect("EHLO probe");
     println!("{host}:{port} SIZE = {limit:?}");
     limit

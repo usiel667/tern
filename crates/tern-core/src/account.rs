@@ -19,6 +19,10 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub security: Security,
+    /// SHA-256 fingerprint ("AB:CD:…") of a certificate the person chose to trust although
+    /// this computer doesn't (a self-signed server). Not a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_cert: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +157,7 @@ fn server(host: &str, port: u16, security: Security) -> ServerConfig {
         host: host.into(),
         port,
         security,
+        trusted_cert: None,
     }
 }
 

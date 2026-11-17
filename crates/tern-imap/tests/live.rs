@@ -31,7 +31,7 @@ fn backend(port: u16, security: Security) -> ImapBackend {
         Some(user.as_str()),
         "TERN_LIVE_WIPE_OK must repeat TERN_IMAP_USER: the tests empty INBOX and Trash"
     );
-    let server = ServerConfig { host: env("TERN_IMAP_HOST").unwrap(), port, security };
+    let server = ServerConfig { host: env("TERN_IMAP_HOST").unwrap(), port, security, trusted_cert: None };
     let cred = Credential::Password {
         username: user,
         // Google shows app passwords in groups of four; it signs in without the spaces.
@@ -179,7 +179,7 @@ async fn full_cycle() {
 
     // Wrong password is an auth error, not a hang.
     let bad = ImapBackend::new(
-        ServerConfig { host: env("TERN_IMAP_HOST").unwrap(), port, security: Security::Tls },
+        ServerConfig { host: env("TERN_IMAP_HOST").unwrap(), port, security: Security::Tls, trusted_cert: None },
         Credential::Password { username: env("TERN_IMAP_USER").unwrap(), password: "wrong".into() },
     );
     assert!(matches!(bad.verify().await, Err(tern_core::Error::Auth(_))));

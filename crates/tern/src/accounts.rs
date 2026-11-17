@@ -1,5 +1,6 @@
 //! "Add Account" sheet, modelled on Apple Mail's provider picker.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -137,6 +138,8 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
     tv.add_top_bar(&adw::HeaderBar::new());
     tv.set_content(Some(&page));
 
+    // Certificates the person chose to trust in this form: (host, port, fingerprint).
+    let pins: Rc<RefCell<Vec<(String, u16, String)>>> = Rc::default();
     let (ui2, dialog2) = (ui.clone(), dialog.clone());
     button.connect_clicked(move |btn| {
         let name_s = name.text().trim().to_string();
@@ -161,11 +164,20 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
             let sec = |p: u16| if matches!(p, 143 | 587 | 25) { Security::StartTls } else { Security::Tls };
             let (ip, sp) = (port(&imap_port, 993), port(&smtp_port, 465));
             cfg.transport = Transport::Imap {
-                imap: ServerConfig { host: imap_host.text().trim().into(), port: ip, security: sec(ip) },
-                smtp: ServerConfig { host: smtp_host.text().trim().into(), port: sp, security: sec(sp) },
+                imap: ServerConfig { host: imap_host.text().trim().into(), port: ip, security: sec(ip), trusted_cert: None },
+                smtp: ServerConfig { host: smtp_host.text().trim().into(), port: sp, security: sec(sp), trusted_cert: None },
             };
             if let Some((_, d)) = email_s.split_once('@') {
                 cfg.description = d.to_string();
+            }
+        }
+        if let Transport::Imap { imap, smtp } = &mut cfg.transport {
+            for server in [imap, smtp] {
+                server.trusted_cert = pins
+                    .borrow()
+                    .iter()
+                    .find(|(h, p, _)| *h == server.host && *p == server.port)
+                    .map(|(_, _, fp)| fp.clone());
             }
         }
 
@@ -173,10 +185,10 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
         spinner.set_spinning(true);
         btn.set_sensitive(false);
         let rx = verify_in_background(cfg.clone(), secret_s, true);
-        let (ui3, dialog3, status2, spinner2, btn2) =
-            (ui2.clone(), dialog2.clone(), status.clone(), spinner.clone(), btn.clone());
+        let (ui3, dialog3, status2, spinner2, btn2, pins) =
+            (ui2.clone(), dialog2.clone(), status.clone(), spinner.clone(), btn.clone(), pins.clone());
         glib::spawn_future_local(async move {
-            let result = rx.recv().await.unwrap_or_else(|_| Err("verification thread stopped".into()));
+            let result = rx.recv().await.unwrap_or_else(|_| Err(Failure::Text("verification thread stopped".into())));
             spinner2.set_spinning(false);
             btn2.set_sensitive(true);
             match result {
@@ -185,7 +197,24 @@ fn form_page(ui: &Rc<Ui>, dialog: &adw::Dialog, provider: Provider, title: &str)
                     ui3.toast("Account added — syncing…");
                     dialog3.close();
                 }
-                Err(e) => show_error(&status2, &e),
+                Err(Failure::Text(e)) => show_error(&status2, &e),
+                Err(Failure::Untrusted(cert, smtp)) => {
+                    let pin = (cert.host.clone(), cert.port, cert.fingerprint.clone());
+                    // The same certificate just trusted for this host's other server (IMAP and
+                    // SMTP usually share one): no need to ask twice.
+                    let known = pins.borrow().iter().any(|(h, _, fp)| *h == cert.host && *fp == cert.fingerprint);
+                    if known {
+                        pins.borrow_mut().push(pin);
+                        btn2.emit_clicked();
+                        return;
+                    }
+                    show_error(&status2, &cert.to_string());
+                    let btn = btn2.clone();
+                    ask_to_trust(&dialog3, &cert, smtp, move || {
+                        pins.borrow_mut().push(pin.clone());
+                        btn.emit_clicked();
+                    });
+                }
             }
         });
     });
@@ -303,9 +332,15 @@ pub fn sign_in_again(ui: &Rc<Ui>, id: &str) {
         let (ui3, dialog3, status2, spinner2, btn2) =
             (ui2.clone(), dialog2.clone(), status.clone(), spinner.clone(), btn.clone());
         glib::spawn_future_local(async move {
-            let result = rx.recv().await.unwrap_or_else(|_| Err("verification thread stopped".into()));
+            let result = rx.recv().await.unwrap_or_else(|_| Err(Failure::Text("verification thread stopped".into())));
             spinner2.set_spinning(false);
             btn2.set_sensitive(true);
+            // A certificate that changed since it was trusted isn't offered here: remove and
+            // add the account again to trust the new one.
+            let result = result.map_err(|f| match f {
+                Failure::Text(e) => e,
+                Failure::Untrusted(cert, _) => cert.to_string(),
+            });
             match result {
                 Ok(()) => {
                     ui3.send(Command::SignIn(Box::new(cfg)));
@@ -332,13 +367,13 @@ fn verify_in_background(
     cfg: AccountConfig,
     secret: String,
     adding: bool,
-) -> async_channel::Receiver<Result<(), String>> {
+) -> async_channel::Receiver<Result<(), Failure>> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build();
         let result = match rt {
-            Ok(rt) => rt.block_on(verify(&cfg, secret)),
-            Err(e) => Err(e.to_string()),
+            Ok(rt) => rt.block_on(verify(&cfg, secret, adding)),
+            Err(e) => Err(Failure::Text(e.to_string())),
         };
         if result.is_err() && adding {
             let _ = tern_auth::delete_secret(cfg.id);
@@ -348,28 +383,102 @@ fn verify_in_background(
     rx
 }
 
-async fn verify(cfg: &AccountConfig, secret: String) -> Result<(), String> {
+/// Why signing in didn't work.
+enum Failure {
+    Text(String),
+    /// A server's certificate this computer doesn't trust; the person may choose to.
+    /// `true`: the outgoing (SMTP) server.
+    Untrusted(tern_tls::Untrusted, bool),
+}
+
+fn tls_start(server: &ServerConfig, smtp: bool) -> tern_tls::Start {
+    match (server.security, smtp) {
+        (Security::Tls, _) => tern_tls::Start::Implicit,
+        (Security::StartTls, false) => tern_tls::Start::ImapStartTls,
+        (Security::StartTls, true) => tern_tls::Start::SmtpStartTls,
+    }
+}
+
+/// The certificate problem with this server, if that's what's wrong.
+async fn untrusted(server: &ServerConfig, smtp: bool) -> Option<tern_tls::Untrusted> {
+    let probe = tern_tls::probe(&server.host, server.port, tls_start(server, smtp), server.trusted_cert.as_deref());
+    match tokio::time::timeout(std::time::Duration::from_secs(10), probe).await {
+        Ok(Err(tern_tls::ConnectError::Untrusted(u))) => Some(u),
+        _ => None,
+    }
+}
+
+async fn verify(cfg: &AccountConfig, secret: String, adding: bool) -> Result<(), Failure> {
+    let text = Failure::Text;
     let oauth = cfg.auth == AuthMethod::OAuth2Google;
     let cred = if oauth {
         let tokens = tern_auth::google::sign_in(&cfg.identity.email, |url| {
             let _ = std::process::Command::new("xdg-open").arg(url).spawn();
         })
         .await
-        .map_err(|e| e.to_string())?;
-        tern_auth::store_tokens(cfg.id, &tokens).map_err(|e| e.to_string())?;
-        tern_auth::credential_for(cfg).await.map_err(|e| e.to_string())?
+        .map_err(|e| text(e.to_string()))?;
+        tern_auth::store_tokens(cfg.id, &tokens).map_err(|e| text(e.to_string()))?;
+        tern_auth::credential_for(cfg).await.map_err(|e| text(e.to_string()))?
     } else {
         tern_auth::credential_from_secret(cfg, &secret)
     };
-    log_in(cfg, cred).await?;
+    if let Err(e) = log_in(cfg, cred).await {
+        if let Transport::Imap { imap, .. } = &cfg.transport
+            && let Some(cert) = untrusted(imap, false).await
+        {
+            return Err(Failure::Untrusted(cert, false));
+        }
+        return Err(text(e));
+    }
+    // Sending isn't tried, but its certificate is looked at now rather than at the first send.
+    if adding
+        && let Transport::Imap { smtp, .. } = &cfg.transport
+        && let Some(cert) = untrusted(smtp, true).await
+    {
+        return Err(Failure::Untrusted(cert, true));
+    }
     if !oauth {
         // The keyring's own message says what to do; no "authentication failed" in front.
         tern_auth::store_secret(cfg.id, &secret).map_err(|e| match e {
-            tern_core::Error::Auth(why) => why,
-            e => e.to_string(),
+            tern_core::Error::Auth(why) => text(why),
+            e => text(e.to_string()),
         })?;
     }
     Ok(())
+}
+
+/// "Trust This Certificate?": what's wrong with it, its fingerprint to compare, and a warning.
+/// `trust` runs if the person says yes.
+fn ask_to_trust(parent: &impl IsA<gtk::Widget>, cert: &tern_tls::Untrusted, smtp: bool, trust: impl Fn() + 'static) {
+    let which = if smtp { "Outgoing (SMTP)" } else { "Incoming (IMAP)" };
+    let body = format!(
+        "{which} server {}, port {}.\n\n{cert}\n\nOnly trust it if this is your own server, or the server’s owner gave you this \
+         fingerprint to check. Tern will then accept this exact certificate for {} and warn you \
+         again if it ever changes.",
+        cert.host, cert.port, cert.host
+    );
+    let alert = adw::AlertDialog::new(Some("Trust This Certificate?"), Some(&body));
+    let fp = gtk::Label::builder()
+        .label(cert.fingerprint.as_str())
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::Char)
+        .selectable(true)
+        .css_classes(["monospace", "dim-label"])
+        .build();
+    let extra = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    extra.append(&gtk::Label::builder().label("SHA-256 fingerprint").css_classes(["heading"]).build());
+    extra.append(&fp);
+    alert.set_extra_child(Some(&extra));
+    alert.add_responses(&[("cancel", "Cancel"), ("trust", "Trust Certificate")]);
+    alert.set_response_appearance("trust", adw::ResponseAppearance::Destructive);
+    alert.set_default_response(Some("cancel"));
+    alert.set_close_response("cancel");
+    alert.connect_response(None, move |_, r| {
+        if r == "trust" {
+            trust();
+        }
+    });
+    alert.present(Some(parent));
 }
 
 async fn log_in(cfg: &AccountConfig, cred: tern_auth::Credential) -> Result<(), String> {
@@ -400,7 +509,11 @@ fn signin_error(cfg: &AccountConfig, host: &str, e: &tern_core::Error) -> String
                 create one at myaccount.google.com/apppasswords (needs 2-Step Verification)."
             .into();
     }
-    format!("Couldn’t sign in to {host}: {e}")
+    match e {
+        // Network text is already in words (and certificate problems say so themselves).
+        tern_core::Error::Network(why) => format!("Couldn’t sign in to {host}: {why}"),
+        e => format!("Couldn’t sign in to {host}: {e}"),
+    }
 }
 
 #[cfg(test)]
