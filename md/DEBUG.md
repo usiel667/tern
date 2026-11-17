@@ -38,20 +38,27 @@ new-mail **notification** shows when the window isn't active; **dark mode**: Pla
 Dark reaches Tern through the portal and the System theme switches live. Clicking in the empty
 New Message body focuses it (so GNOME finding 9 was the VM's first click focusing the window).
 
-Open:
-1. **Breeze icons replace Adwaita's** (GTK follows the desktop's icon theme): the welcome
-   picture becomes an inbox-download tray, the Google row gets a red no-entry-like icon (reads
-   as an error), several toolbar icons change shape. Ship Tern's own symbolic icons for the
-   ones that matter, or set Adwaita as the icon theme for Tern's windows.
-2. **Clicking the new-mail notification does nothing** (window not raised, message not
-   selected). The notification is also titled "tern" with no icon. Likely both from the
-   missing .desktop file / app icon (Plasma can't map dev.tern.Tern to an app); re-test once
-   the packaging installs them.
-3. **Counts lag behind the list**: after a pushed message the header said "5 messages, 1
-   unread" with 6 rows and 2 unread dots; after sending, Drafts kept "1" until opened (server
-   Drafts was empty). They settle on the next update, so a missed MailboxesChanged somewhere
-   (not KDE-specific).
-4. Taskbar shows a generic Wayland "W" icon (same packaging gap as GNOME finding 6).
+Fixed 2026-11-17 (checked on the KDE VM, and GNOME for regressions):
+1. ✅ Icons (70ba147): every icon Tern uses is bundled as `tern-*-symbolic` (Adwaita 51's,
+   LGPL-3.0 option), so Breeze can't swap them; a test checks every icon name is bundled.
+2. ✅ Notification click (3cfdfc4): GLib 2.90 sent an unsandboxed app's notifications through
+   the desktop portal, which can't tell which app they're from, so the click never came back
+   (not the .desktop file: installing it alone didn't help). Tern now picks GLib's "gtk"
+   backend on GNOME (also raises out of the overview) and "freedesktop" elsewhere; Flatpak
+   left to the portal. Plus an app icon, the .desktop file using it, the name "Tern", and
+   dev/install-desktop-entry.sh. One click out of four failed right after installing the
+   .desktop file, likely Plasma's app cache catching up; not explained.
+3. ✅ Counts (5fbe8a4): STATUS on a mailbox the connection still had selected answered from
+   that session's stale view (Dovecot), so counts came out one short; NOOP first.
+
+Still open:
+4. Taskbar icon fixed only where the .desktop file and icon are installed (package or
+   dev/install-desktop-entry.sh).
+6. **New mail arrives above the visible top of the list**: with the list scrolled to the top,
+   a new message is inserted above the first visible row and stays out of view until you
+   scroll up (KDE and GNOME). Apple Mail shows it. Keep the list at the top when it was there.
+7. Gmail's STATUS is known to lag ~10 s behind changes made on other connections (see
+   `pushed` in tern-imap); counts there may still lag briefly after push. Not checked.
 5. VM setup notes: Fedora 45 KDE boots into Plasma Setup (first-run wizard) unless
    `/etc/plasma-setup-done` exists; a mirror once cut the 890 MB installer image short, so
    `vm.sh install` now serves a locally downloaded, checksum-verified `install.img`.
