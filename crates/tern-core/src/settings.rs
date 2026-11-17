@@ -16,6 +16,9 @@ pub struct Settings {
     pub list_width: Option<u32>,
     /// Vim keys across the main window: h/l between panes, j/k, gg/G, Ctrl+D/U, dd, u undo.
     pub vim_keys: bool,
+    /// Keys that also leave Insert mode in the New Message body when typed quickly, like
+    /// Vim's `inoremap kj <Esc>` (empty: only Esc and Ctrl+[).
+    pub vim_escape: String,
     /// Shortcuts changed in Settings → Keyboard, by id (`keys::SHORTCUTS`); the rest keep
     /// their defaults.
     pub keys: crate::keys::Overrides,
@@ -32,6 +35,7 @@ impl Default for Settings {
             mailboxes_width: None,
             list_width: None,
             vim_keys: false,
+            vim_escape: String::new(),
             keys: Default::default(),
             theme: crate::themes::SYSTEM.to_string(),
         }

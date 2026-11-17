@@ -136,7 +136,7 @@ Key decisions:
 | Remove account | ✅ | Settings → Accounts, with rename and Sign In Again |
 | App zoom | ✅ | Ctrl+= / Ctrl+- / Ctrl+0, 70–200%, remembered |
 | Smooth scrolling on/off | ⬜ | not in Settings (an old `smooth_scrolling` key in settings.toml is ignored); owner request 2026-10-27: Preferences toggle for the message view (WebKit `enable-smooth-scrolling`); default on. On NVIDIA Tern uses GTK's OpenGL renderer, which made scrolling smooth (see md/DEBUG.md 2026-10-27) |
-| Vim key bindings (optional) | ✅ | Settings → Keyboard toggle: j/k, h/l, gg/G, / and more around the app, skipped while typing; New Message gets Vim editing (Normal/Insert/Visual, text objects, f/t, `.`, `/`, block cursor in Normal) |
+| Vim key bindings (optional) | ✅ | Settings → Keyboard toggle: j/k, h/l, gg/G, / and more around the app, skipped while typing; New Message gets Vim editing (Normal/Insert/Visual, text objects, f/t, `.`, `/`, block cursor in Normal); keys that also leave Insert mode (like `kj`, Vim's `inoremap kj <Esc>`) |
 | Custom keyboard shortcuts | ✅ | every shortcut rebindable in Settings → Keyboard, with conflict warnings |
 | Themes | ✅ | Settings → Appearance: System, Adwaita Light/Dark and 17 palettes (Tokyo Night ×4, Catppuccin ×4, Rosé Pine ×3, Gruvbox ×2, Nord, Dracula, Everforest, Kanagawa); tints the chrome, messages and New Message. Palettes MIT-licensed, keep attribution |
 

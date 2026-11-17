@@ -54,6 +54,42 @@ impl Out {
     }
 }
 
+/// What to do with a key typed in Insert mode when some keys work as Esc there (like Vim's
+/// `inoremap kj <Esc>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Escape {
+    /// Hold the key back: it may be the start of the Esc keys.
+    Hold,
+    /// The Esc keys are complete: leave Insert mode (the held keys are dropped).
+    Esc,
+    /// Not the Esc keys: let the key through as usual.
+    Pass,
+}
+
+/// Keys that may work as Esc in Insert mode: two to four characters, no spaces (empty: none).
+pub fn valid_escape_keys(keys: &str) -> bool {
+    keys.is_empty() || ((2..=4).contains(&keys.chars().count()) && !keys.chars().any(|c| c.is_whitespace() || c.is_control()))
+}
+
+/// Insert mode with `seq` working as Esc: `held` is what's been held back so far, `key` the
+/// key just typed (a Vim key name). Returns the held text to type now (it wasn't the start of
+/// `seq` after all) and what to do with `key`.
+pub fn escape_step(seq: &str, held: &str, key: &str) -> (String, Escape) {
+    let single = key.chars().count() == 1;
+    if seq.is_empty() || !valid_escape_keys(seq) || !single {
+        return (held.to_string(), Escape::Pass);
+    }
+    let both = format!("{held}{key}");
+    if both == seq {
+        return (String::new(), Escape::Esc);
+    }
+    if seq.starts_with(&both) {
+        return (String::new(), Escape::Hold);
+    }
+    // The held keys were just typing; this key may start the sequence afresh.
+    (held.to_string(), if seq.starts_with(key) { Escape::Hold } else { Escape::Pass })
+}
+
 #[derive(Debug, Clone)]
 pub struct Vim {
     pub mode: Mode,
@@ -1083,5 +1119,26 @@ mod tests {
         assert_eq!(v.status(), "NORMAL");
         v.key("a", 0, "2");
         assert_eq!(v.status(), "NORMAL   2");
+    }
+
+    #[test]
+    fn keys_typed_as_esc() {
+        use Escape::*;
+        let s = |seq, held, key| escape_step(seq, held, key);
+        // kj: k is held, j completes it.
+        assert_eq!(s("kj", "", "k"), (String::new(), Hold));
+        assert_eq!(s("kj", "k", "j"), (String::new(), Esc));
+        // k then something else: the k is typed, then the key goes through.
+        assert_eq!(s("kj", "k", "x"), ("k".into(), Pass));
+        // k k: the first k is typed, the second may still start kj.
+        assert_eq!(s("kj", "k", "k"), ("k".into(), Hold));
+        assert_eq!(s("jj", "j", "j"), (String::new(), Esc));
+        // Other keys, special keys and no sequence are untouched.
+        assert_eq!(s("kj", "", "j"), (String::new(), Pass));
+        assert_eq!(s("kj", "k", "<CR>"), ("k".into(), Pass));
+        assert_eq!(s("", "", "k"), (String::new(), Pass));
+        assert_eq!(s("jkl", "jk", "l"), (String::new(), Esc));
+        assert!(valid_escape_keys("kj") && valid_escape_keys("") && valid_escape_keys("jkjk"));
+        assert!(!valid_escape_keys("k") && !valid_escape_keys("k j") && !valid_escape_keys("abcde"));
     }
 }

@@ -1,15 +1,21 @@
 //! Vim editing in the New Message body (when Vim keys are on): runs `tern_core::vim_text` on
 //! the text box. Starts in Insert mode; Esc → Normal (block cursor); Esc again is the
-//! window's (asks to close). Each change is one undo step, so `u` / Ctrl+R use the box's undo.
+//! window's (asks to close). Keys set in Settings → Keyboard (like kj) also work as Esc. Each change is one undo step, so `u` / Ctrl+R use the box's undo.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use tern_core::vim_text::{Action, Mode, Vim};
+use std::time::Duration;
+
+use tern_core::vim_text::{Action, Escape, Mode, Vim, escape_step};
 
 use crate::app::Ui;
+
+/// How long the keys set to work as Esc (Settings → Keyboard) may take, like Vim's
+/// `timeoutlen`; a held key is typed after this.
+const ESCAPE_WAIT: Duration = Duration::from_millis(1000);
 
 /// Hook Vim up to `body`; `status` shows the mode. `run` does save / close for `:w` / `:q`.
 pub fn attach(ui: &Rc<Ui>, body: &gtk::TextView, status: &gtk::Label, run: Rc<dyn Fn(Action)>) {
@@ -19,6 +25,24 @@ pub fn attach(ui: &Rc<Ui>, body: &gtk::TextView, status: &gtk::Label, run: Rc<dy
     let on = ui.settings.borrow().vim_keys;
     status.set_visible(on);
     status.set_label(&vim.borrow().status());
+
+    // Keys held back while they may be the start of the Esc keys, and the timer that types them.
+    let held: Rc<RefCell<String>> = Rc::default();
+    let held_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+    {
+        // Leaving the body (a click on Send) types anything held back.
+        let focus = gtk::EventControllerFocus::new();
+        let (held, held_timer, body2) = (held.clone(), held_timer.clone(), body.downgrade());
+        focus.connect_leave(move |_| {
+            if let Some(id) = held_timer.take() {
+                id.remove();
+            }
+            if let Some(body) = body2.upgrade() {
+                type_held(&body, &held.take());
+            }
+        });
+        body.add_controller(focus);
+    }
 
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -32,11 +56,58 @@ pub fn attach(ui: &Rc<Ui>, body: &gtk::TextView, status: &gtk::Label, run: Rc<dy
             return glib::Propagation::Proceed;
         }
         status.set_visible(true);
-        let Some(name) = key_name(key, mods) else { return glib::Propagation::Proceed };
+        let name = key_name(key, mods);
         let mut v = vim.borrow_mut();
-        // Insert mode: only Esc is ours; don't copy the text for every typed letter.
-        if v.mode == Mode::Insert && name != "<Esc>" {
-            return glib::Propagation::Proceed;
+        let name = match name {
+            Some(n) if v.mode == Mode::Insert && n != "<Esc>" => {
+                // Keys set to work as Esc (kj): held back until they finish or don't.
+                let seq = ui.settings.borrow().vim_escape.clone();
+                let before = held.take();
+                let (flush, then) = escape_step(&seq, &before, &n);
+                if let Some(id) = held_timer.take() {
+                    id.remove();
+                }
+                type_held(&body2, &flush);
+                match then {
+                    Escape::Esc => "<Esc>".to_string(),
+                    Escape::Hold if !body2.buffer().has_selection() => {
+                        held.replace(format!("{}{n}", if flush.is_empty() { before } else { String::new() }));
+                        status.set_label(&format!("{}   {}", v.status(), held.borrow()));
+                        let (held, timer, body, status, vim) = (held.clone(), held_timer.clone(), body2.downgrade(), status.clone(), vim.clone());
+                        held_timer.replace(Some(glib::timeout_add_local_once(ESCAPE_WAIT, move || {
+                            timer.take();
+                            if let Some(body) = body.upgrade() {
+                                type_held(&body, &held.take());
+                            }
+                            if let Ok(v) = vim.try_borrow() {
+                                status.set_label(&v.status());
+                            }
+                        })));
+                        return glib::Propagation::Stop;
+                    }
+                    // Insert mode: only Esc is ours; don't copy the text for every typed letter.
+                    _ => {
+                        status.set_label(&v.status());
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            Some(n) => n,
+            None => {
+                // A shortcut or arrow: type anything held back first.
+                if let Some(id) = held_timer.take() {
+                    id.remove();
+                }
+                type_held(&body2, &held.take());
+                return glib::Propagation::Proceed;
+            }
+        };
+        if v.mode == Mode::Insert && name == "<Esc>" {
+            // Esc itself (or Ctrl+[) while keys are held: they were typing, then Esc.
+            if let Some(id) = held_timer.take() {
+                id.remove();
+            }
+            type_held(&body2, &held.take());
         }
         let buffer = body2.buffer();
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true).to_string();
@@ -86,6 +157,18 @@ pub fn attach(ui: &Rc<Ui>, body: &gtk::TextView, status: &gtk::Label, run: Rc<dy
         glib::Propagation::Stop
     });
     body.add_controller(keys);
+}
+
+/// Type keys that were held back, as if typed then.
+fn type_held(body: &gtk::TextView, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let buffer = body.buffer();
+    buffer.begin_user_action();
+    buffer.insert_interactive_at_cursor(text, body.is_editable());
+    buffer.end_user_action();
+    body.scroll_mark_onscreen(&buffer.get_insert());
 }
 
 /// A key press as Vim names it, or `None` for keys left to the text box and window (arrows,

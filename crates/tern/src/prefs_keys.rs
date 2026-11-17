@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use tern_core::keys::{self, Group, Shortcut};
+use tern_core::vim_text;
 use tern_sync::Command;
 
 use crate::app::Ui;
@@ -30,6 +31,7 @@ pub fn page(ui: &Rc<Ui>) -> adw::PreferencesPage {
         .active(ui.settings.borrow().vim_keys)
         .build();
     vim_group.add(&vim);
+    vim_group.add(&escape_row(ui));
     page.add(&vim_group);
     {
         let ui = ui.clone();
@@ -61,6 +63,33 @@ pub fn page(ui: &Rc<Ui>) -> adw::PreferencesPage {
     reset_group.add(&reset_all);
     page.add(&reset_group);
     page
+}
+
+/// The keys that also leave Insert mode in New Message (like `inoremap kj <Esc>`).
+fn escape_row(ui: &Rc<Ui>) -> adw::EntryRow {
+    let row = adw::EntryRow::builder()
+        .title("Also leave Insert mode with (like kj; New Message)")
+        .text(ui.settings.borrow().vim_escape.as_str())
+        .show_apply_button(true)
+        .build();
+    row.connect_changed(|row| {
+        if vim_text::valid_escape_keys(&row.text()) {
+            row.remove_css_class("error");
+        } else {
+            row.add_css_class("error");
+        }
+    });
+    let ui = ui.clone();
+    row.connect_apply(move |row| {
+        let keys = row.text().to_string();
+        if !vim_text::valid_escape_keys(&keys) {
+            ui.toast("Use 2 to 4 keys with no spaces, like kj (or leave it empty)");
+            return;
+        }
+        ui.settings.borrow_mut().vim_escape = keys;
+        save(&ui);
+    });
+    row
 }
 
 fn description(group: Group) -> &'static str {
