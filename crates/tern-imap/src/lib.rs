@@ -499,6 +499,13 @@ impl MailBackend for ImapBackend {
             };
             // Counts for the whole mailbox (only part of it is cached). Asked before SELECT,
             // since STATUS on the selected mailbox is discouraged; a failure just means none.
+            // If this connection still has the mailbox selected from the last sync, the server
+            // answers STATUS from that session's view, which hasn't seen mail delivered since
+            // (Dovecot does): the counts came out one message short while the new message was
+            // fetched, so the shown counts lagged until the next sync. A NOOP catches it up.
+            if c.selected.as_deref() == Some(mailbox) {
+                c.session.noop().await.map_err(cmd)?;
+            }
             let items = if ext.condstore {
                 "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY HIGHESTMODSEQ)"
             } else {
