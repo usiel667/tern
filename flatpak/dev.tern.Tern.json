@@ -1,0 +1,44 @@
+{
+  "id": "dev.tern.Tern",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "51",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "tern",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--talk-name=org.freedesktop.secrets"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/tern/cargo",
+      "CARGO_NET_OFFLINE": "true"
+    }
+  },
+  "modules": [
+    {
+      "name": "tern",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo --offline build --release --locked -p tern",
+        "install -Dm755 target/release/tern /app/bin/tern",
+        "install -Dm644 crates/tern/data/dev.tern.Tern.desktop /app/share/applications/dev.tern.Tern.desktop",
+        "install -Dm644 crates/tern/data/dev.tern.Tern.svg /app/share/icons/hicolor/scalable/apps/dev.tern.Tern.svg",
+        "install -Dm644 crates/tern/data/dev.tern.Tern.metainfo.xml /app/share/metainfo/dev.tern.Tern.metainfo.xml"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "..",
+          "skip": ["target", "flatpak/.flatpak-builder", "flatpak/build", "flatpak/repo", ".obsidian", "md/.zennotes"]
+        },
+        "cargo-sources.json"
+      ]
+    }
+  ]
+}

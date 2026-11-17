@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.tern.Tern</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Tern</name>
+  <summary>Read and send email</summary>
+  <description>
+    <p>
+      Tern is a mail app in the style of Apple Mail: mailboxes, messages and the open
+      message side by side, with conversations, search, flags and quick keyboard shortcuts.
+    </p>
+    <p>
+      It works with iCloud, Gmail (with an app password), Fastmail and any IMAP and SMTP
+      server, keeps a local copy for fast search and offline reading, and keeps passwords in
+      your desktop's keyring. Remote content in messages is blocked until you allow it.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.tern.Tern.desktop</launchable>
+  <url type="homepage">https://github.com/usiel667/tern</url>
+  <url type="bugtracker">https://github.com/usiel667/tern/issues</url>
+  <developer id="dev.tern">
+    <name>The Tern developers</name>
+  </developer>
+  <provides>
+    <binary>tern</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>Email</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-17" type="development"/>
+  </releases>
+</component>

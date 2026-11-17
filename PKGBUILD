@@ -36,4 +36,5 @@ package() {
   install -Dm755 target/release/tern "$pkgdir/usr/bin/tern"
   install -Dm644 crates/tern/data/dev.tern.Tern.desktop "$pkgdir/usr/share/applications/dev.tern.Tern.desktop"
   install -Dm644 crates/tern/data/dev.tern.Tern.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.tern.Tern.svg"
+  install -Dm644 crates/tern/data/dev.tern.Tern.metainfo.xml "$pkgdir/usr/share/metainfo/dev.tern.Tern.metainfo.xml"
 }

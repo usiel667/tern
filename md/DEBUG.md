@@ -21,6 +21,28 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-17 — Flatpak: builds on GNOME 51, installs and runs on Plasma
+
+`flatpak/dev.tern.Tern.json` (GNOME 51 runtime with WebKitGTK 6, rust-stable//26.08, offline
+cargo sources from flatpak-cargo-generator) built in the Fedora GNOME VM: Tern compiles in
+~2 min, bundle 4.8 MB. In that VM `flatpak-builder` needed `--disable-rofiles-fuse`
+(fusermount3 "Permission denied" unmounting rofiles; the build itself was fine). Installed
+the bundle on the Fedora KDE VM (pulls org.gnome.Platform//51) and ran it as a first run:
+welcome view, dark mode from the portal, Add Account → Trust This Certificate → password in
+ksecretd through `--talk-name=org.freedesktop.secrets`, sync, search, notification shows
+"Tern" with the icon and clicking it brings Tern up with the message (portal path), and the
+data lives in `~/.var/app/dev.tern.Tern`.
+
+Open:
+1. **First open of an uncached message with attachments clips the attachment row**: the
+   header is laid out before the body (and its attachments) arrives and doesn't grow, so
+   only the chip's top edge shows; opening the message again is fine. Not Flatpak-specific
+   (it showed there because nothing was cached yet).
+2. Inside the sandbox `sans-serif` is DejaVu Sans (the runtime's default), not the desktop's
+   Noto Sans, so Tern's text looks different from native apps.
+3. The notification stays on screen after it's clicked (portal path).
+4. Not tried in the Flatpak yet: attachment Open/Save, sending, print, mailto.
+
 ## 2026-11-17 — First run on a clean Fedora 45 KDE Plasma VM (beta portability test)
 
 Test machine: Fedora 45 KDE Plasma 6.8.1 on Wayland (KWin), Plasma Login Manager (not SDDM),
