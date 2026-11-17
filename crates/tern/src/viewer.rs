@@ -430,8 +430,12 @@ impl Viewer {
             self.attachments.remove(&c);
         }
         // A chip for every attachment the message's own HTML doesn't show (pictures shown
-        // below the text keep one, for saving).
-        for (i, a) in body.attachments.iter().enumerate().filter(|(i, _)| !rendered.placed.contains(i)) {
+        // below the text keep one, for saving). The row is shown before the chips go in:
+        // filled while hidden (after a message without attachments), it came back only as
+        // tall as its margin, the chips cut off (seen on Plasma and in the demo, 2026-11-17).
+        let chips: Vec<usize> = (0..body.attachments.len()).filter(|i| !rendered.placed.contains(i)).collect();
+        self.attachments.set_visible(!chips.is_empty());
+        for (i, a) in chips.into_iter().map(|i| (i, &body.attachments[i])) {
             let name = a.filename.clone().unwrap_or_else(|| format!("attachment-{}", i + 1));
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             chip.append(&gtk::Image::from_icon_name("tern-mail-attachment-symbolic"));
@@ -445,7 +449,6 @@ impl Viewer {
             });
             self.attachments.append(&btn);
         }
-        self.attachments.set_visible(self.attachments.first_child().is_some());
     }
 
     fn fill_thread(&self, ui: &Rc<Ui>, m: &MessageSummary) {
