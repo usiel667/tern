@@ -96,7 +96,7 @@ pub fn body_from_raw(raw: Vec<u8>) -> MessageBody {
             .filter_map(|p| p.text_contents().map(str::to_owned))
             .collect(),
     )
-    .or_else(|| msg.body_text(0).map(|c| c.into_owned()));
+    .or_else(|| main_text(&msg));
     // Only real text/html parts (mail-parser synthesises HTML from text otherwise).
     let html = joined(
         msg.html_bodies()
@@ -269,7 +269,7 @@ pub fn draft_from_raw(raw: &[u8], envelope_rcpts: &[String]) -> Option<Draft> {
         cc,
         bcc,
         subject: msg.subject().unwrap_or_default().to_owned(),
-        text: msg.body_text(0).map(|t| t.replace("\r\n", "\n").trim_end().to_owned()).unwrap_or_default(),
+        text: main_text(&msg).map(|t| t.replace("\r\n", "\n").trim_end().to_owned()).unwrap_or_default(),
         html: None,
         in_reply_to: id_list(msg.in_reply_to()).into_iter().next(),
         references: id_list(msg.references()),
@@ -354,8 +354,45 @@ pub fn tidy_preview(preview: &str) -> String {
     strip_comments(preview).split_whitespace().map(without_link).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
+/// HTML elements that start a new line when the HTML is turned into text.
+const BLOCK_TAGS: &[&str] = &[
+    "address", "article", "aside", "blockquote", "dd", "div", "dl", "dt", "figcaption", "figure", "footer", "h1", "h2",
+    "h3", "h4", "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "td", "th",
+    "tr", "ul",
+];
+
+/// HTML as plain text, with a line break wherever a block (heading, paragraph, list item,
+/// table cell…) starts or ends, so `<h1>Hi</h1><p>There` reads "Hi\nThere", not "HiThere".
+/// (mail-parser's converter only breaks lines at `<br>` and `</p>`.)
+pub fn html_text(html: &str) -> String {
+    let mut marked = String::with_capacity(html.len() + 64);
+    let mut rest = html;
+    while let Some(at) = rest.find('<') {
+        marked.push_str(&rest[..at]);
+        let tag = &rest[at + 1..];
+        let name = tag.strip_prefix('/').unwrap_or(tag);
+        let end = name.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(name.len());
+        if end > 0 && BLOCK_TAGS.iter().any(|b| b.eq_ignore_ascii_case(&name[..end])) {
+            marked.push_str("<br>");
+        }
+        marked.push('<');
+        rest = tag;
+    }
+    marked.push_str(rest);
+    mail_parser::decoders::html::html_to_text(&marked)
+}
+
+/// The message's main text: its first text part, or its HTML part as text.
+fn main_text(msg: &mail_parser::Message<'_>) -> Option<String> {
+    let first = msg.text_body.first().and_then(|&i| msg.part(i));
+    match first {
+        Some(part) if part.is_content_type("text", "html") => part.text_contents().map(html_text),
+        _ => msg.body_text(0).map(|t| t.into_owned()),
+    }
+}
+
 fn preview_of(msg: &mail_parser::Message<'_>) -> Option<String> {
-    let text = msg.body_text(0)?;
+    let text = main_text(msg)?;
     let text = strip_comments(&text);
     let mut out = String::with_capacity(PREVIEW_CHARS);
     let mut last_space = true;
@@ -581,5 +618,16 @@ Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n--B--\r\n"
         let b = body_from_raw(b"Subject: x\r\n\r\njust text\r\n".to_vec());
         assert!(b.html.is_none());
     }
-}
 
+    #[test]
+    fn html_blocks_keep_their_breaks() {
+        assert_eq!(html_text("<h1>Hi</h1><p>An <b>HTML</b> mail.</p>").split_whitespace().collect::<Vec<_>>(), ["Hi", "An", "HTML", "mail."]);
+        assert_eq!(html_text("<div>one</div><div>two</div><ul><li>a</li><li>b</li></ul>").split_whitespace().collect::<Vec<_>>(), ["one", "two", "a", "b"]);
+        // Inline tags don't break words, and <b>/<body> aren't mistaken for <br>/<blockquote>.
+        assert_eq!(html_text("<body>x<b>y</b>z</body>").trim(), "xyz");
+        let header = b"From: a@x\r\nSubject: s\r\nContent-Type: text/html\r\n\r\n";
+        let body = b"<h1>Hi</h1><p>An <b>HTML</b> mail with <a href=\"https://example.org\">a link</a>.</p>\r\n";
+        let e = envelope_from_parts("1".into(), header, Some(body), Flags::default(), 0, None);
+        assert_eq!(e.preview.as_deref(), Some("Hi An HTML mail with a link."));
+    }
+}
