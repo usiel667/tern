@@ -34,10 +34,9 @@ pub async fn connect(server: &ServerConfig, cred: &Credential) -> Result<Session
         Security::Tls => Start::Implicit,
         Security::StartTls => Start::ImapStartTls,
     };
-    // Certificate problems come back in plain words (still Network: retried like before).
-    let stream = tern_tls::open(&server.host, server.port, start, server.trusted_cert.as_deref())
-        .await
-        .map_err(|e| Error::Network(e.to_string()))?;
+    // Certificate problems come back as Error::Certificate (retried like a network error).
+    let trusted = server.trusted_cert.as_deref();
+    let stream = tern_tls::open(&server.host, server.port, start, trusted).await.map_err(|e| e.into_error(trusted))?;
     let mut client = Client::new(stream);
     if start == Start::Implicit {
         client

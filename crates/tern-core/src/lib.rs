@@ -16,4 +16,4 @@ pub mod themes;
 pub mod threading;
 pub mod vim_text;
 
-pub use error::{Error, Result};
+pub use error::{CertIssue, Error, Result};

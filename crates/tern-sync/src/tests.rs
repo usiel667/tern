@@ -24,6 +24,8 @@ struct Fake {
     older_rejects: Mutex<bool>,
     /// Make `list_mailboxes` fail as if the password were wrong.
     bad_password: Mutex<bool>,
+    /// The server presents an untrusted certificate.
+    bad_cert: Mutex<Option<tern_core::CertIssue>>,
     /// Make `submit` fail as a server refusing the message would.
     refuse_submit: Mutex<bool>,
     /// What `send_limit` reports.
@@ -60,6 +62,9 @@ impl MailBackend for Fake {
         self.log.lock().unwrap().push("list".into());
         if *self.bad_password.lock().unwrap() {
             return Err(Error::Auth("bad password".into()));
+        }
+        if let Some(issue) = self.bad_cert.lock().unwrap().clone() {
+            return Err(Error::Certificate(Box::new(issue)));
         }
         let mb = |id: &str, role| RemoteMailbox {
             remote_id: id.into(),
@@ -1280,4 +1285,54 @@ async fn one_click_unsubscribe_posts_the_rfc_8058_body() {
     let (url, server) = http_once("404 Not Found").await;
     assert!(one_click_unsubscribe(&url).await.unwrap_err().contains("404"));
     server.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_changed_certificate_is_reported_once_and_can_be_trusted() {
+    let fake = Arc::new(Fake::default());
+    let (tx, rx) = async_channel::unbounded();
+    let mut engine = Engine::new(Store::open_in_memory().unwrap(), tx);
+    let mut cfg = AccountConfig::preset(Provider::Generic, "Tom", "tom@example.org");
+    let Transport::Imap { imap, .. } = &mut cfg.transport else { panic!("generic is IMAP") };
+    imap.trusted_cert = Some("OLD".into());
+    let (id, host, port) = (cfg.id, imap.host.clone(), imap.port);
+    let f = fake.clone();
+    engine.connect = Arc::new(move |_| {
+        let b: Arc<dyn MailBackend> = f.clone();
+        Box::pin(async move { Ok(b) })
+    });
+    *fake.bad_cert.lock().unwrap() = Some(tern_core::CertIssue {
+        host: host.clone(),
+        port,
+        fingerprint: "NEW".into(),
+        trusted: Some("OLD".into()),
+        message: "Tern can’t verify the security certificate of imap.example.org: it is self-signed.".into(),
+    });
+    engine.add(cfg, fake.clone());
+    engine.start_account(id);
+    engine.settle().await;
+    for _ in 0..3 {
+        engine.handle(Command::SyncAll);
+        run_for(&mut engine, Duration::from_secs(10)).await;
+    }
+    let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let warnings: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::CertificateProblem { account, issue } => Some((*account, issue.fingerprint.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings, vec![(id, "NEW".to_string())], "one warning, however often it retries");
+    assert!(!events.iter().any(|e| matches!(e, Event::Error { .. })), "no toasts as well");
+
+    // Trusted: saved on the account and connected again, with no more warnings.
+    *fake.bad_cert.lock().unwrap() = None;
+    engine.handle(Command::TrustCertificate { account: id, host, port, fingerprint: "NEW".into() });
+    run_for(&mut engine, Duration::from_secs(5)).await;
+    let Transport::Imap { imap, smtp } = &engine.accounts[&id].cfg.transport else { unreachable!() };
+    assert_eq!(imap.trusted_cert.as_deref(), Some("NEW"));
+    assert_eq!(smtp.trusted_cert, None, "only the server at that host and port");
+    let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(events.iter().any(|e| matches!(e, Event::SyncFinished(a) if *a == id)));
 }

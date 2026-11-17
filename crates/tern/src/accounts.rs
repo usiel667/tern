@@ -503,6 +503,68 @@ async fn tern_jmap_verify(session_url: &str, token: String) -> Result<(), String
 
 /// The message shown when signing in fails. Google refuses regular passwords over IMAP, which
 /// is the most likely mistake with a Gmail account, so say what's needed instead.
+/// A server of a working account presented a certificate that isn't trusted (it changed
+/// since it was trusted, or the system stopped trusting it). Which server, old and new
+/// fingerprints, and the choice: keep blocking it, or trust the new one.
+pub fn certificate_problem(ui: &Rc<Ui>, account: tern_core::model::AccountId, issue: &tern_core::CertIssue) {
+    let Some(cfg) = ui.account_for(account) else { return };
+    let smtp = matches!(&cfg.transport, Transport::Imap { smtp, .. } if smtp.host == issue.host && smtp.port == issue.port);
+    let which = if smtp { "Outgoing (SMTP)" } else { "Incoming (IMAP)" };
+    let (heading, advice) = if issue.trusted.is_some() {
+        (
+            "Certificate Changed",
+            "This isn’t the certificate you trusted before. Servers do get new certificates, but \
+             this is also what someone listening in between would look like. Trust the new one \
+             only if you expected the change or can check its fingerprint with the server’s \
+             owner. Until then Tern won’t connect to this server.",
+        )
+    } else {
+        ("Untrusted Certificate", "Tern won’t connect to this server until you decide.")
+    };
+    let body = format!(
+        "{which} server {}, port {}, for {}.\n\n{}\n\n{advice}",
+        issue.host, issue.port, cfg.identity.email, issue.message
+    );
+    let alert = adw::AlertDialog::new(Some(heading), Some(&body));
+    let extra = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let fingerprint = |title: &str, fp: &str| {
+        extra.append(&gtk::Label::builder().label(title).css_classes(["heading"]).build());
+        extra.append(
+            &gtk::Label::builder()
+                .label(fp)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::Char)
+                .selectable(true)
+                .css_classes(["monospace", "dim-label"])
+                .build(),
+        );
+    };
+    if let Some(old) = &issue.trusted {
+        fingerprint("Trusted until now (SHA-256)", old);
+    }
+    fingerprint("Presented now (SHA-256)", &issue.fingerprint);
+    alert.set_extra_child(Some(&extra));
+    alert.add_responses(&[("block", "Keep Blocking"), ("trust", "Trust the New Certificate")]);
+    alert.set_response_appearance("trust", adw::ResponseAppearance::Destructive);
+    alert.set_default_response(Some("block"));
+    alert.set_close_response("block");
+    let (ui2, issue) = (ui.clone(), issue.clone());
+    alert.connect_response(None, move |_, r| {
+        if r == "trust" {
+            ui2.send(Command::TrustCertificate {
+                account,
+                host: issue.host.clone(),
+                port: issue.port,
+                fingerprint: issue.fingerprint.clone(),
+            });
+            ui2.toast("Certificate trusted — connecting…");
+        } else {
+            tracing::info!(host = issue.host, "kept blocking an untrusted certificate");
+        }
+    });
+    alert.present(Some(&ui.window));
+}
+
 fn signin_error(cfg: &AccountConfig, host: &str, e: &tern_core::Error) -> String {
     if cfg.provider == Provider::Gmail && cfg.auth == AuthMethod::Password && matches!(e, tern_core::Error::Auth(_)) {
         return "Google didn’t accept that password. Use an app password, not your regular Google password: \

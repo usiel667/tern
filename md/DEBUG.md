@@ -55,10 +55,18 @@ Fixed 2026-11-17 (each checked on the VM, Dovecot + Postfix with a private-CA ce
 Still open:
 5. Keyring entry label `keyring:<uuid>@dev.tern.Tern` (Seahorse shows it). Label "Tern: <email>".
 6. No app icon (generic gear in the dock).
-7. **A trusted certificate that later changes fails silently**: the engine treats it like being
-   offline and retries; the window shows nothing (log: "network error: Tern can't verify the
-   security certificate of …"). Needs an account banner, and a way to trust the new one
-   (Sign In Again reuses the loaded config, so it can't save a new pin; remove + re-add works).
+7. ✅ (2026-11-17) **A trusted certificate that later changes** now opens "Certificate Changed":
+   which server (incoming/outgoing, host, port, account), the problem, the fingerprint trusted
+   until now and the one presented now, and **Trust the New Certificate** (saved, reconnects)
+   or **Keep Blocking**. New `Error::Certificate` (retried like a network error), engine event
+   `CertificateProblem` once per certificate, `Command::TrustCertificate`. Checked on the VM by
+   swapping Dovecot's certificate: dialog at once, Keep Blocking stays quiet while retries keep
+   failing, Trust saves the new fingerprint and mail arrives live again.
+   Found on the way: the push watcher only logged its errors, and after any reconnect (new
+   password too) the old watcher kept running with the old settings and push wasn't restarted.
+   Watchers now have a generation number: a reconnect starts a new one, the old one stops.
+   Still open: after Keep Blocking nothing shows the account is blocked until Tern restarts
+   (then it asks again). A sidebar warning on the account would be better.
 8. cargo deny now fails on RUSTSEC-2026-0543 "chrono is unmaintained" (new advisory, not from
    these changes; main fails the same).
 9. Unconfirmed: in the VM a click in the empty New Message body didn't focus it (Tab did);

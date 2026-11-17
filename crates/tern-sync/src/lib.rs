@@ -11,7 +11,7 @@
 pub mod config;
 pub mod demo;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,7 +131,7 @@ impl Op {
 /// Errors that mean "couldn't reach the server" rather than "the server said no":
 /// the op stays queued and is retried on the next successful contact.
 fn keeps_op(e: &Error) -> bool {
-    matches!(e, Error::Network(_) | Error::Auth(_) | Error::Storage(_))
+    e.is_network() || matches!(e, Error::Auth(_) | Error::Storage(_))
 }
 
 /// How long to hold a message before sending it, and the key to take it back with.
@@ -200,6 +200,9 @@ pub enum Command {
     /// the retry back-off. Also loads an account that couldn't sign in at startup.
     SignIn(Box<AccountConfig>),
     RemoveAccount(AccountId),
+    /// Trust the certificate with this fingerprint for the account's server(s) at
+    /// `host:port` (saved to accounts.toml), then connect again.
+    TrustCertificate { account: AccountId, host: String, port: u16, fingerprint: String },
     /// The accounts' new sidebar order (saved to accounts.toml). Ids not listed keep their
     /// relative order after the listed ones.
     ReorderAccounts(Vec<AccountId>),
@@ -253,6 +256,10 @@ pub enum Event {
     /// Signing in to an account failed (wrong or missing password, expired token); the UI
     /// offers to sign in again (`Command::SignIn`).
     SignInFailed { account: AccountId, message: String },
+    /// A server of this account presented a certificate this computer doesn't trust and that
+    /// isn't the one the account trusts (it changed). Sent once per certificate; the account
+    /// stays blocked until `Command::TrustCertificate`.
+    CertificateProblem { account: AccountId, issue: tern_core::CertIssue },
 }
 
 /// RFC 8058: a POST with only `List-Unsubscribe=One-Click` in its body, no cookies, no
@@ -417,6 +424,11 @@ pub struct Engine {
     /// Drafts with an upload in flight (one at a time per draft).
     drafts_uploading: std::collections::HashSet<String>,
     auth_retry: HashMap<AccountId, AuthRetry>,
+    /// The current push watcher of each account; an older one stops when it sees a newer number
+    /// (after a reconnect its backend has old settings: a replaced password or certificate).
+    watch_gen: HashMap<AccountId, Arc<std::sync::atomic::AtomicU64>>,
+    /// Certificates already reported (account, fingerprint), so retries don't repeat the warning.
+    cert_warned: std::cell::RefCell<HashSet<(AccountId, String)>>,
     connect: Connect,
     /// Accounts with a queued op in flight; ops run one at a time per account.
     draining: std::collections::HashSet<AccountId>,
@@ -480,6 +492,8 @@ impl Engine {
             send_limits: Default::default(),
             drafts_uploading: Default::default(),
             auth_retry: Default::default(),
+            cert_warned: Default::default(),
+            watch_gen: Default::default(),
             connect: Arc::new(|cfg| Box::pin(async move { backend_for(&cfg).await })),
             draining: Default::default(),
             loading_older: Default::default(),
@@ -622,8 +636,12 @@ impl Engine {
         });
     }
 
-    /// Long-lived push watcher on the inbox. Not counted as in-flight work.
-    fn watch_inbox(&self, id: AccountId) {
+    /// Long-lived push watcher on the inbox. Not counted as in-flight work. Starting one stops
+    /// the account's previous watcher.
+    fn watch_inbox(&mut self, id: AccountId) {
+        use std::sync::atomic::Ordering;
+        let gen_now = self.watch_gen.entry(id).or_default().clone();
+        let mine = gen_now.fetch_add(1, Ordering::SeqCst) + 1;
         let Some(acct) = self.accounts.get(&id) else { return };
         let backend = acct.backend.clone();
         let tx = self.tx.clone();
@@ -637,6 +655,9 @@ impl Engine {
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(5);
             loop {
+                if gen_now.load(Ordering::SeqCst) != mine {
+                    break; // replaced after a reconnect
+                }
                 match backend.wait_for_push(&inbox, IDLE_TIMEOUT).await {
                     Ok(Some(ev)) => {
                         backoff = Duration::from_secs(5);
@@ -647,6 +668,10 @@ impl Engine {
                     Ok(None) => backoff = Duration::from_secs(5),
                     Err(e) => {
                         warn!(%id, "push watcher: {e}; retrying in {backoff:?}");
+                        // An untrusted certificate is for the person to decide on, not just the log.
+                        if matches!(e, Error::Certificate(_)) && gen_now.load(Ordering::SeqCst) == mine {
+                            let _ = tx.send(Internal::Failed { account: Some(id), mailbox: None, error: e });
+                        }
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(Duration::from_secs(300));
                     }
@@ -785,6 +810,9 @@ impl Engine {
             }
             Command::SignIn(cfg) => self.sign_in(*cfg),
             Command::RemoveAccount(id) => self.remove_account(id),
+            Command::TrustCertificate { account, host, port, fingerprint } => {
+                self.trust_certificate(account, &host, port, fingerprint)
+            }
             Command::Shutdown => {}
         }
     }
@@ -800,6 +828,12 @@ impl Engine {
             (Some(account), Error::Auth(_)) => {
                 warn!(%account, "{e}");
                 self.emit(Event::SignInFailed { account, message: e.to_string() });
+            }
+            (Some(account), Error::Certificate(issue)) => {
+                warn!(%account, host = issue.host, port = issue.port, fingerprint = issue.fingerprint, "{e}");
+                if self.cert_warned.borrow_mut().insert((account, issue.fingerprint.clone())) {
+                    self.emit(Event::CertificateProblem { account, issue: (**issue).clone() });
+                }
             }
             _ => self.fail(account, e),
         }
@@ -1320,7 +1354,7 @@ impl Engine {
         let remote_id = match result {
             Ok(id) => id,
             // Offline: the local copy stays pending and the periodic flush tries again.
-            Err(Error::Network(e)) => return debug!(%key, "draft not uploaded yet: {e}"),
+            Err(e) if e.is_network() => return debug!(%key, "draft not uploaded yet: {e}"),
             Err(e) => return self.fail(Some(account), e),
         };
         copy.remote_id = remote_id;
@@ -1482,7 +1516,39 @@ impl Engine {
         self.rebuild_backend(loaded, Duration::ZERO, true);
     }
 
+    fn trust_certificate(&mut self, id: AccountId, host: &str, port: u16, fingerprint: String) {
+        let apply = |cfg: &mut AccountConfig| {
+            if let Transport::Imap { imap, smtp } = &mut cfg.transport {
+                for server in [imap, smtp] {
+                    if server.host == host && server.port == port {
+                        server.trusted_cert = Some(fingerprint.clone());
+                    }
+                }
+            }
+        };
+        let Some(a) = self.accounts.get_mut(&id) else { return };
+        apply(&mut a.cfg);
+        let cfg = a.cfg.clone();
+        if let Some(paths) = &self.paths {
+            let mut file = paths.load_accounts().unwrap_or_default();
+            if let Some(a) = file.accounts.iter_mut().find(|a| a.id == id) {
+                apply(a);
+            }
+            if let Err(e) = paths.save_accounts(&file) {
+                return self.fail(Some(id), e);
+            }
+        }
+        info!(account = %id, host, port, "certificate trusted");
+        self.cert_warned.borrow_mut().retain(|(a, _)| *a != id);
+        self.auth_retry.insert(id, AuthRetry { pending: true, failures: 0 });
+        self.rebuild_backend(cfg, Duration::ZERO, true);
+        self.emit(Event::AccountsChanged);
+    }
+
     fn remove_account(&mut self, id: AccountId) {
+        if let Some(watcher) = self.watch_gen.remove(&id) {
+            watcher.fetch_add(1, std::sync::atomic::Ordering::SeqCst); // stops it
+        }
         self.accounts.remove(&id);
         self.prefetching.remove(&id);
         self.auth_retry.remove(&id);
@@ -1603,7 +1669,7 @@ impl Engine {
                         }
                     }
                     // Not a rollback case: nothing local changed, so no resync.
-                    Err(Error::Network(e)) => info!(%account, "loading older mail: {e}"),
+                    Err(e) if e.is_network() => info!(%account, "loading older mail: {e}"),
                     Err(e @ Error::Auth(_)) => {
                         if self.schedule_reconnect(account) {
                             self.fail_with(Some(account), e);
@@ -1638,7 +1704,7 @@ impl Engine {
                             // Someone opened it meanwhile: fetch it for real, errors and all.
                             self.fetch_body(id);
                         }
-                        if matches!(error, Error::Network(_) | Error::Auth(_)) {
+                        if error.is_network() || matches!(error, Error::Auth(_)) {
                             // Wait for the next sync (or reconnect) to start again.
                             return;
                         }
@@ -1685,6 +1751,7 @@ impl Engine {
                     self.start_account(id);
                 } else {
                     self.refresh_mailboxes(id);
+                    self.watch_inbox(id);
                     self.probe_send_limit(id);
                 }
             }

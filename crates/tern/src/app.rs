@@ -544,6 +544,7 @@ fn handle_event(ui: &Rc<Ui>, ev: Event) {
                 ui.toasts.add_toast(t);
             }
         },
+        Event::CertificateProblem { account, issue } => accounts::certificate_problem(ui, account, &issue),
         Event::SignInFailed { account, message } => {
             let name = ui.account_for(account).map(|a| a.identity.email).unwrap_or_default();
             ui.toast_sign_in(account, &format!("Couldn’t sign in to {name}: {message}"));

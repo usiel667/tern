@@ -144,7 +144,7 @@ async fn connection(server: &ServerConfig) -> Result<lettre::transport::smtp::cl
     if let Some(trusted) = server.trusted_cert.as_deref() {
         let tls = tern_tls::open(&server.host, server.port, start(server), Some(trusted))
             .await
-            .map_err(|e| Error::Network(e.to_string()))?;
+            .map_err(|e| e.into_error(Some(trusted)))?;
         // lettre reads a greeting first; after STARTTLS the server sends none (RFC 3207).
         let greeting: &'static [u8] = if server.security == Security::StartTls { b"220 TLS ready\r\n" } else { b"" };
         let stream = Box::new(Smtps { greeting, at: 0, tls });
@@ -223,7 +223,7 @@ async fn explain_certificate(server: &ServerConfig, e: Error) -> Error {
         return e;
     }
     match tern_tls::probe(&server.host, server.port, start(server), None).await {
-        Err(tern_tls::ConnectError::Untrusted(u)) => Error::Network(u.to_string()),
+        Err(u @ tern_tls::ConnectError::Untrusted(_)) => u.into_error(None),
         _ => e,
     }
 }

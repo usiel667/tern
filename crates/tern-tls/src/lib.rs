@@ -110,6 +110,23 @@ impl fmt::Display for ConnectError {
     }
 }
 
+impl ConnectError {
+    /// As a Tern error: a certificate problem becomes `Error::Certificate` (with the
+    /// fingerprint the account trusted, `trusted`), anything else `Error::Network`.
+    pub fn into_error(self, trusted: Option<&str>) -> tern_core::Error {
+        match self {
+            ConnectError::Untrusted(u) => tern_core::Error::Certificate(Box::new(tern_core::CertIssue {
+                message: u.to_string(),
+                host: u.host,
+                port: u.port,
+                fingerprint: u.fingerprint,
+                trusted: trusted.map(str::to_owned),
+            })),
+            ConnectError::Other(why) => tern_core::Error::Network(why),
+        }
+    }
+}
+
 /// A certificate's SHA-256 fingerprint as people compare them: "AB:CD:…" (32 pairs).
 pub fn fingerprint(der: &[u8]) -> String {
     Sha256::digest(der).iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(":")

@@ -244,7 +244,7 @@ impl ImapBackend {
         let conn = guard.as_mut().expect("just connected");
         let result = f(conn).await;
         conn.last_used = Instant::now();
-        if matches!(result, Err(Error::Network(_) | Error::Protocol(_))) {
+        if matches!(&result, Err(e) if e.is_network() || matches!(e, Error::Protocol(_))) {
             *guard = None;
         }
         result
