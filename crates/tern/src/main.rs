@@ -71,7 +71,23 @@ fn prefer_gl_on_nvidia() -> bool {
     true
 }
 
+/// Pick how notifications are sent, so clicking one brings Tern forward with that message.
+/// GLib 2.90 otherwise sends an unsandboxed app's notifications through the desktop portal,
+/// which can't tell which app it is, and the click never reached Tern (seen on Plasma,
+/// 2026-11-17). On GNOME, GNOME Shell's own interface (GLib's "gtk" backend) is the one that
+/// also raises the window out of the overview; elsewhere the freedesktop notification server.
+/// Inside a Flatpak the portal knows the app, so it's left alone there.
+fn choose_notification_backend() {
+    if std::env::var_os("GNOTIFICATION_BACKEND").is_some() || std::path::Path::new("/.flatpak-info").exists() {
+        return;
+    }
+    let gnome = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("GNOME")));
+    // SAFETY: first thing in `main`, before any other thread exists.
+    unsafe { std::env::set_var("GNOTIFICATION_BACKEND", if gnome { "gtk" } else { "freedesktop" }) };
+}
+
 fn main() -> gtk::glib::ExitCode {
+    choose_notification_backend();
     let gl = prefer_gl_on_nvidia();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -83,12 +99,18 @@ fn main() -> gtk::glib::ExitCode {
     if gl {
         tracing::info!("NVIDIA driver: using GTK's OpenGL renderer (set GSK_RENDERER to override)");
     }
+    tracing::debug!(backend = ?std::env::var_os("GNOTIFICATION_BACKEND"), "notifications");
     let (args, gtk_args) = parse_args();
+    // The name notifications and the desktop show (otherwise the binary's, "tern").
+    gtk::glib::set_application_name("Tern");
     let app = adw::Application::builder()
         .application_id(if args.demo { "dev.tern.Tern.Demo" } else { APP_ID })
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
-    app.connect_startup(|_| app::load_css());
+    app.connect_startup(|_| {
+        app::load_css();
+        gtk::Window::set_default_icon_name(APP_ID);
+    });
     // Both handlers run in the primary instance; a second `tern` forwards to it over D-Bus.
     let ui: Rc<RefCell<Option<Rc<app::Ui>>>> = Rc::default();
     let ensure_ui = move |app: &adw::Application| -> Option<Rc<app::Ui>> {

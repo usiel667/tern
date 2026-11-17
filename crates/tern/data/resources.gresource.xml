@@ -37,6 +37,9 @@
     <file preprocess="xml-stripblanks" alias="tern-emblem-important-symbolic.svg">icons/tern-emblem-important-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="tern-folder-symbolic.svg">icons/tern-folder-symbolic.svg</file>
   </gresource>
+  <gresource prefix="/dev/tern/Tern/icons/scalable/apps">
+    <file preprocess="xml-stripblanks">dev.tern.Tern.svg</file>
+  </gresource>
   <gresource prefix="/dev/tern/Tern">
     <file>style.css</file>
     <file>theme.css</file>
