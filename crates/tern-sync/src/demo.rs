@@ -347,9 +347,23 @@ impl MailBackend for DemoBackend {
         Ok(())
     }
 
-    async fn wait_for_push(&self, _: &str, timeout: Duration) -> Result<Option<PushEvent>> {
-        tokio::time::sleep(timeout).await;
-        Ok(None)
+    /// Nothing ever arrives, unless `TERN_DEMO_NEW_MAIL=<seconds>` is set: then a new unread
+    /// message lands in the inbox that often (for trying how new mail shows up).
+    async fn wait_for_push(&self, inbox: &str, timeout: Duration) -> Result<Option<PushEvent>> {
+        let every = std::env::var("TERN_DEMO_NEW_MAIL").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&n| n > 0);
+        let Some(every) = every.map(Duration::from_secs).filter(|&e| e <= timeout) else {
+            tokio::time::sleep(timeout).await;
+            return Ok(None);
+        };
+        tokio::time::sleep(every).await;
+        let n = *self.appended.lock().unwrap() + 1;
+        let raw = format!(
+            "From: Demo Sender <new@example.org>\r\nTo: Tom <tom@example.com>\r\nSubject: New message {n}\r\n\
+             Date: {}\r\nMessage-ID: <new{n}@example.org>\r\n\r\nThis one just arrived.\r\n",
+            Utc::now().to_rfc2822()
+        );
+        self.append(inbox, raw.as_bytes(), &Flags::default()).await?;
+        Ok(Some(PushEvent::MailboxChanged { remote_id: inbox.to_string() }))
     }
 
     fn handles_submission(&self) -> bool {

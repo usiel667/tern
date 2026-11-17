@@ -77,9 +77,11 @@ Fixed 2026-11-17 (checked on the KDE VM, and GNOME for regressions):
 Still open:
 4. Taskbar icon fixed only where the .desktop file and icon are installed (package or
    dev/install-desktop-entry.sh).
-6. **New mail arrives above the visible top of the list**: with the list scrolled to the top,
-   a new message is inserted above the first visible row and stays out of view until you
-   scroll up (KDE and GNOME). Apple Mail shows it. Keep the list at the top when it was there.
+6. ✅ (2026-11-17) **New mail arrived above the visible top of the list** (GTK keeps the rows
+   in view in place). At the top of the list it now stays at the top, so new mail shows;
+   scrolled down, the position is kept and a "↑ N New Messages" pill appears (click: go up;
+   scrolling up clears it). Try it in the demo with `TERN_DEMO_NEW_MAIL=6` (a new message
+   every 6 s).
 7. Gmail's STATUS is known to lag ~10 s behind changes made on other connections (see
    `pushed` in tern-imap); counts there may still lag briefly after push. Not checked.
 5. VM setup notes: Fedora 45 KDE boots into Plasma Setup (first-run wizard) unless

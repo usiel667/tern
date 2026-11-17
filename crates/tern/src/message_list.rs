@@ -30,6 +30,9 @@ pub struct MessageList {
     sync_btn: gtk::Button,
     welcome_btn: gtk::Button,
     scroller: gtk::ScrolledWindow,
+    /// "↑ 2 New Messages": new mail arrived above the rows you're looking at; click to go up.
+    new_pill: gtk::Button,
+    new_count: Cell<usize>,
     /// How many rows to load from the cache; grows as you scroll down.
     limit: Cell<u32>,
     /// The last reload hit `limit`, so the cache has more rows to show.
@@ -102,7 +105,16 @@ impl MessageList {
             .build();
 
         let stack = gtk::Stack::new();
-        stack.add_named(&scroller, Some("list"));
+        let new_pill = gtk::Button::builder()
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .margin_top(8)
+            .css_classes(["pill", "suggested-action"])
+            .visible(false)
+            .build();
+        let list_overlay = gtk::Overlay::builder().child(&scroller).build();
+        list_overlay.add_overlay(&new_pill);
+        stack.add_named(&list_overlay, Some("list"));
         stack.add_named(&empty, Some("empty"));
         stack.add_named(&welcome, Some("welcome"));
 
@@ -167,6 +179,8 @@ impl MessageList {
             sidebar_btn,
             welcome_btn,
             scroller,
+            new_pill,
+            new_count: Cell::new(0),
             limit: Cell::new(PAGE),
             more_cached: Cell::new(false),
             restoring: Cell::new(false),
@@ -297,11 +311,30 @@ pub fn reload(ui: &Rc<Ui>) {
             redraw_row(ui, m);
         }
     } else {
+        // New mail above the first row there was: GTK keeps the rows you're looking at in
+        // place, so it lands out of view above them. At the top of the list, stay at the top
+        // (it shows, like Apple Mail); scrolled down, say so with the pill (2026-11-17).
+        let at_top = ui.list.scroller.vadjustment().value() < 1.0;
+        let first_old = old.first().and_then(|m| m.as_ref()).map(|m| m.id);
+        let above = match first_old {
+            Some(id) if rows.iter().any(|r| r.id == id) => rows.iter().take_while(|r| r.id != id).count(),
+            _ => {
+                show_new_pill(ui, 0); // another list (or its first row went away)
+                0
+            }
+        };
         let head = old.iter().zip(&rows).take_while(|(a, b)| same(a, b)).count();
         let tail = old[head..].iter().rev().zip(rows[head..].iter().rev()).take_while(|(a, b)| same(a, b)).count();
         let objs: Vec<glib::BoxedAnyObject> =
             rows[head..rows.len() - tail].iter().cloned().map(glib::BoxedAnyObject::new).collect();
         ui.list.model.splice(head as u32, (old.len() - head - tail) as u32, &objs);
+        if above > 0 {
+            if at_top {
+                ui.list.view.scroll_to(0, gtk::ListScrollFlags::NONE, None);
+            } else {
+                show_new_pill(ui, ui.list.new_count.get() + above);
+            }
+        }
     }
     ui.list.restoring.set(true);
     for (i, m) in rows.iter().enumerate() {
@@ -516,7 +549,35 @@ fn context_menu() -> gio::Menu {
     menu
 }
 
+/// Show the "new messages above" pill for `n` messages (hidden for 0).
+fn show_new_pill(ui: &Ui, n: usize) {
+    ui.list.new_count.set(n);
+    ui.list.new_pill.set_visible(n > 0);
+    if n > 0 {
+        ui.list.new_pill.set_label(&if n == 1 { "↑ 1 New Message".to_string() } else { format!("↑ {n} New Messages") });
+    }
+}
+
 pub fn connect(ui: &Rc<Ui>) {
+    {
+        let weak = Rc::downgrade(ui);
+        ui.list.new_pill.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.list.view.scroll_to(0, gtk::ListScrollFlags::NONE, None);
+                show_new_pill(&ui, 0);
+            }
+        });
+        // Scrolled up to them yourself: the pill has done its job.
+        let weak = Rc::downgrade(ui);
+        ui.list.scroller.vadjustment().connect_value_changed(move |adj| {
+            if let Some(ui) = weak.upgrade()
+                && adj.value() < 1.0
+                && ui.list.new_count.get() > 0
+            {
+                show_new_pill(&ui, 0);
+            }
+        });
+    }
     let list = &ui.list;
     let factory = list
         .view
