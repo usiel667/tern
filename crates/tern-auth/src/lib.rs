@@ -55,14 +55,39 @@ impl OAuthTokens {
 }
 
 fn entry(account: AccountId) -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, &account.to_string()).map_err(|e| Error::Auth(e.to_string()))
+    keyring::Entry::new(SERVICE, &account.to_string()).map_err(keyring_error)
+}
+
+/// A keyring failure in words a person can act on (still `Error::Auth`, so the engine treats
+/// it as before). The details stay in the log.
+fn keyring_error(e: keyring::Error) -> Error {
+    let detail = e.to_string();
+    tracing::warn!("keyring: {detail}");
+    Error::Auth(explain_keyring(&detail, matches!(e, keyring::Error::NoStorageAccess(_))))
+}
+
+/// The two problems people actually hit: a keyring that's locked and can't ask to be
+/// unlocked (Fedora's oo7 after automatic login, 2026-11-16), and no keyring at all (a bare
+/// window manager).
+pub fn explain_keyring(detail: &str, no_access: bool) -> String {
+    let d = detail.to_ascii_lowercase();
+    if d.contains("prompt") || d.contains("locked") || d.contains("dismissed") {
+        "Your keyring is locked, so Tern can’t save or read the password. Unlock it (open \
+         Passwords and Keys, or log in to your desktop with your password instead of \
+         automatic login), then try again."
+            .into()
+    } else if no_access || d.contains("org.freedesktop.secrets") || d.contains("serviceunknown") {
+        "Tern keeps passwords in your desktop’s keyring, and none is running. Install and start \
+         one (gnome-keyring, KWallet, or KeePassXC with Secret Service turned on), then try again."
+            .into()
+    } else {
+        format!("Tern couldn’t use your keyring: {detail}")
+    }
 }
 
 /// Save a password, app password, or API token for an account.
 pub fn store_secret(account: AccountId, secret: &str) -> Result<()> {
-    entry(account)?
-        .set_password(secret)
-        .map_err(|e| Error::Auth(e.to_string()))
+    entry(account)?.set_password(secret).map_err(keyring_error)
 }
 
 pub fn store_tokens(account: AccountId, tokens: &OAuthTokens) -> Result<()> {
@@ -71,15 +96,13 @@ pub fn store_tokens(account: AccountId, tokens: &OAuthTokens) -> Result<()> {
 }
 
 pub fn delete_secret(account: AccountId) -> Result<()> {
-    entry(account)?
-        .delete_credential()
-        .map_err(|e| Error::Auth(e.to_string()))
+    entry(account)?.delete_credential().map_err(keyring_error)
 }
 
 fn load_secret(account: AccountId) -> Result<String> {
     entry(account)?.get_password().map_err(|e| match e {
         keyring::Error::NoEntry => Error::Auth("no saved credentials; sign in again".into()),
-        e => Error::Auth(e.to_string()),
+        e => keyring_error(e),
     })
 }
 
@@ -144,6 +167,22 @@ mod tests {
         assert_eq!(password(credential_from_secret(&other, "pa ss\r\n")), "pa ss");
         let fastmail = AccountConfig::preset(Provider::Fastmail, "T", "t@fastmail.com");
         assert!(matches!(credential_from_secret(&fastmail, "tok\n"), Credential::Bearer { token } if token == "tok"));
+    }
+
+    #[test]
+    fn keyring_errors_say_what_to_do() {
+        // Fedora 45's oo7 after automatic login (seen on the test VM, 2026-11-16).
+        let oo7 = "Platform failure: zbus error: org.freedesktop.zbus.Error: org.freedesktop.DBus.Error.Failed: \
+                   CLI prompter failed: org.freedesktop.DBus.Error.NameHasNoOwner: Destination does not exist";
+        assert!(explain_keyring(oo7, false).starts_with("Your keyring is locked"));
+        assert!(explain_keyring("Platform failure: prompt dismissed", false).contains("locked"));
+        // No Secret Service at all.
+        let none = "Platform failure: zbus error: org.freedesktop.DBus.Error.ServiceUnknown: \
+                    The name org.freedesktop.secrets was not provided by any .service files";
+        assert!(explain_keyring(none, false).contains("none is running"));
+        assert!(explain_keyring("anything", true).contains("none is running"));
+        // Anything else keeps its detail.
+        assert_eq!(explain_keyring("odd", false), "Tern couldn’t use your keyring: odd");
     }
 
     #[test]

@@ -363,8 +363,10 @@ async fn verify(cfg: &AccountConfig, secret: String) -> Result<(), String> {
     };
     log_in(cfg, cred).await?;
     if !oauth {
-        tern_auth::store_secret(cfg.id, &secret).map_err(|e| {
-            format!("{e}\n\nIs a Secret Service provider running (gnome-keyring or KeePassXC)?")
+        // The keyring's own message says what to do; no "authentication failed" in front.
+        tern_auth::store_secret(cfg.id, &secret).map_err(|e| match e {
+            tern_core::Error::Auth(why) => why,
+            e => e.to_string(),
         })?;
     }
     Ok(())
