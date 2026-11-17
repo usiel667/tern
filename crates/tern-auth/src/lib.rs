@@ -96,7 +96,11 @@ pub fn store_tokens(account: AccountId, tokens: &OAuthTokens) -> Result<()> {
 }
 
 pub fn delete_secret(account: AccountId) -> Result<()> {
-    entry(account)?.delete_credential().map_err(keyring_error)
+    match entry(account)?.delete_credential() {
+        // Nothing saved (a sign-in that failed before saving): nothing to delete.
+        Err(keyring::Error::NoEntry) => Ok(()),
+        r => r.map_err(keyring_error),
+    }
 }
 
 fn load_secret(account: AccountId) -> Result<String> {
