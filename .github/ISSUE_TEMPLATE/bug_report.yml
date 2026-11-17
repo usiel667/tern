@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in Tern doesn't work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Tern! In Tern, **Mailboxes menu → Report a Bug…** opens this form
+        with the Environment box filled in. Please leave out passwords, email addresses and
+        message contents — write "my iCloud address" rather than the address itself.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: And what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Click …
+        3. See …
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Mail provider
+      description: Which kind of account was involved (if any)?
+      multiple: true
+      options:
+        - iCloud
+        - Gmail
+        - Fastmail
+        - Other IMAP/SMTP (self-hosted, work, …)
+        - Not account-related
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Filled in by Report a Bug… (Tern version, distribution, desktop, library versions).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (optional)
+      description: |
+        Start Tern from a terminal (`tern`, or `flatpak run dev.tern.Tern`) and paste the lines
+        around the problem. Check it for addresses or subjects you'd rather not share first.
+      render: text

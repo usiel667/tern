@@ -55,6 +55,7 @@ impl Sidebar {
         menu.append_section(None, &view);
         let about = gtk::gio::Menu::new();
         about.append(Some("Settings…"), Some("win.preferences"));
+        about.append(Some("Report a Bug…"), Some("win.report-bug"));
         about.append(Some("About Tern"), Some("win.about"));
         about.append(Some("Quit"), Some("app.quit"));
         menu.append_section(None, &about);

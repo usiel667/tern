@@ -604,12 +604,23 @@ fn install_actions(ui: &Rc<Ui>) {
     simple("about", Box::new(|ui| {
         let about = adw::AboutDialog::builder()
             .application_name("Tern")
-            .application_icon("tern-mail-unread-symbolic")
+            .application_icon(crate::APP_ID)
             .version(env!("CARGO_PKG_VERSION"))
             .comments("An Apple Mail-style email client for Linux")
             .license_type(gtk::License::Gpl30)
+            .website("https://github.com/usiel667/tern")
+            .issue_url(crate::report::issue_url(&crate::report::Environment::here()))
             .build();
         about.present(Some(&ui.window));
+    }));
+    // A new GitHub issue with this machine's versions filled in (nothing personal).
+    simple("report-bug", Box::new(|ui| {
+        let url = crate::report::issue_url(&crate::report::Environment::here());
+        gtk::UriLauncher::new(&url).launch(Some(&ui.window), gio::Cancellable::NONE, |r| {
+            if let Err(e) = r {
+                tracing::warn!("couldn't open the bug report page: {e}");
+            }
+        });
     }));
 
     crate::message_window::install_view_actions(ui, win, &ui.viewer);
