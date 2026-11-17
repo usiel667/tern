@@ -21,6 +21,40 @@ eval "$(dev/test-imap-server.sh env)" && cargo test -p tern-imap --test live -- 
 dev/live-test.sh .env.gmail-test                     # same tests on the throwaway Gmail (git-ignored settings; wipes its INBOX/Trash)
 ```
 
+## 2026-11-17 — Ubuntu 26.04 (Flatpak) and Arch AUR package in a clean chroot
+
+**Ubuntu 26.04.1 LTS, GNOME (ubuntu-desktop-minimal), Flatpak bundle** (VM from the cloud
+image + cloud-init, `~/VMs/tern/ubuntu-gnome`, `~/VMs/tern/cloudvm.sh`): first run works —
+welcome view (picks up Ubuntu's orange accent through the portal), Add Account → Trust This
+Certificate → password in gnome-keyring, sync, first open of a message with an attachment
+(chip shown), Open → the portal's "Open With" chooser → Text Editor, notification from
+"Tern" with the icon and clicking it opens the message. libadwaita's own icons (back arrow,
+password eye) follow Yaru, Tern's are its own. Ubuntu notes for the test VM: sudo is
+sudo-rs (ignores `-E`); Postfix "No configuration" has no main.cf; Dovecot is 2.4.2, so
+`dovecot_config_version` must match it (setup-test-mail.sh now handles all three).
+
+Found and fixed:
+1. Opening a message from a notification showed it but left the list highlighting the
+   message open before. It's selected in the list now too (when listed).
+
+**Arch: PKGBUILD in a clean chroot** (`extra-x86_64-build` in an Arch cloud-image VM,
+`~/VMs/tern/arch-aur`; source cloned from GitHub like an AUR user):
+2. ✅ **The build failed at the link**: makepkg's default LTO compiled the C inside aws-lc-rs
+   (pulled in by reqwest's `rustls` feature, used by tern-jmap and oauth2) as LTO objects
+   Rust's linker can't use — undefined `aws_lc_*` symbols. `options=('!lto')` fixes it; then
+   all workspace tests pass in the chroot and the package (5.1 MB) installs, puts the
+   binary, .desktop file, icon and metainfo in place, and `tern --demo` starts (Xvfb).
+3. ✅ namcap: listed the libraries Tern links directly (glib2, gdk-pixbuf2, pango, cairo,
+   graphene, glibc, libgcc) in `depends`.
+4. ✅ **Name clash**: the AUR already has `tern` — a PostgreSQL migration tool, also
+   `/usr/bin/tern`. Dropped `provides=('tern')` (helpers would take tern-git for it); kept
+   `conflicts=('tern')`. **Decision needed before publishing**: the stable package can't be
+   called `tern` (e.g. `tern-mail`), and the binary name clashes with that tool.
+
+Still open:
+5. aws-lc-rs is a second crypto library next to ring (Tern's choice); moving reqwest to
+   `rustls` with the ring provider would drop it (and the LTO trap with it).
+
 ## 2026-11-17 — Flatpak: builds on GNOME 51, installs and runs on Plasma
 
 `flatpak/dev.tern.Tern.json` (GNOME 51 runtime with WebKitGTK 6, rust-stable//26.08, offline

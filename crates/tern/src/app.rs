@@ -668,6 +668,9 @@ fn install_actions(ui: &Rc<Ui>) {
         show.connect_activate(move |_, p| {
             if let Some(id) = p.and_then(|v| v.get::<i64>()) {
                 ui.window.present();
+                // Select it in the list too (when it's listed), not just show it: the list
+                // kept highlighting the message open before (seen on Ubuntu, 2026-11-17).
+                crate::message_list::select_ids(&ui, &[MessageId(id)]);
                 ui.viewer.show(&ui, MessageId(id));
             }
         });
